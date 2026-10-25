@@ -1,17 +1,30 @@
 // Decides how a 16:9 stream becomes a 9:16 clip, from where the faces are:
-//   🎮 streamer: a SMALL face near an edge = a webcam box over gameplay → cam on top, gameplay below
-//   🎙️ podcast: BIG faces = people talking → a full-height crop that follows whoever is speaking
+//   🎮 streamer: a SMALL face that stays in one spot near an edge = a webcam box over gameplay → cam on top, gameplay below
+//   🎙️ podcast: BIG faces = people talking → a full-height crop that follows the person on screen / whoever is speaking
 //   🕹️ gameplay: no steady face → the whole frame on a blurred copy of itself
 // A tag from the streamer list ("streamer" / "podcast") always wins over the guess.
+const path = require("path");
 const { TOOLS, run, round, clamp } = require("./tools");
 
 const W = 1080, H = 1920;
 const even = (x) => Math.round(x / 2) * 2;
 
+// Faces between start and end of a video file, plus its camera cuts; all times in seconds from `start`.
 async function findFaces(file, start, end, every = 0.5) {
-  const out = await run(TOOLS.python(), [require("path").join(__dirname, "faces.py"), file, String(start), String(end),
-    String(every), TOOLS.faceModel()]);
-  return JSON.parse(out);
+  const cuts = await shotCuts(file, start, end);
+  const after = cuts.map((c) => round(c + 0.15)).filter((t) => t < end - start).join(","); // a look into every shot
+  const out = await run(TOOLS.python(), [path.join(__dirname, "faces.py"), file, String(start), String(end),
+    String(every), TOOLS.faceModel(), ...(after ? [after] : [])]);
+  return { ...JSON.parse(out), cuts };
+}
+
+// Camera cuts (seconds from start), from FFmpeg's scene detector: an edited podcast switches cameras every few
+// seconds, and the crop has to jump with the picture.
+async function shotCuts(file, start, end) {
+  let log = "";
+  await run(TOOLS.ffmpeg(), ["-hide_banner", "-nostats", "-ss", String(start), "-t", String(round(end - start)), "-i", file,
+    "-an", "-sn", "-vf", "scale=320:-2,scdet=threshold=10", "-f", "null", "-"], { onErr: (d) => (log += d) });
+  return [...log.matchAll(/lavfi\.scd\.time: ([\d.]+)/g)].map((m) => Number(m[1])).filter((t) => t > 0.05);
 }
 
 const median = (xs) => {
@@ -19,21 +32,40 @@ const median = (xs) => {
   return s.length ? s[Math.floor(s.length / 2)] : 0;
 };
 
+// Faces grouped by where they sit in the frame (cx, cy as 0-1), most seen first. A webcam face stays in one spot;
+// game characters (which the face finder sees too) wander around.
+function spots(samples, sw, sh) {
+  const groups = [];
+  for (const s of samples) {
+    for (const f of s.faces) {
+      const cx = (f.x + f.w / 2) / sw, cy = (f.y + f.h / 2) / sh;
+      let g = groups.find((q) => Math.abs(q.cx - cx) < 0.06 && Math.abs(q.cy - cy) < 0.08);
+      if (!g) groups.push((g = { cx, cy, faces: [] }));
+      g.faces.push(f);
+      g.cx += (cx - g.cx) / g.faces.length;
+      g.cy += (cy - g.cy) / g.faces.length;
+    }
+  }
+  return groups.sort((a, b) => b.faces.length - a.faces.length);
+}
+
 // The guess. Returns { kind, cam?, why }.
 function decide(found, override) {
   const { width: sw, height: sh, samples } = found;
-  const withFace = samples.filter((s) => s.faces.length);
-  const share = withFace.length / Math.max(1, samples.length);
-  const biggest = withFace.map((s) => s.faces.reduce((a, b) => (b.h > a.h ? b : a)));
   if (override === "podcast") return { kind: "podcast", why: "tagged podcast" };
-  if (share < 0.3 && override !== "streamer") return { kind: "gameplay", why: `a face in only ${Math.round(share * 100)}% of frames` };
-  const hRatio = median(biggest.map((f) => f.h / sh));
-  const cx = median(biggest.map((f) => (f.x + f.w / 2) / sw)), cy = median(biggest.map((f) => (f.y + f.h / 2) / sh));
-  const nearEdge = cx < 0.3 || cx > 0.7 || cy < 0.3 || cy > 0.7;
-  if (override === "streamer" || (hRatio < 0.22 && nearEdge)) {
-    if (!biggest.length) return { kind: "gameplay", why: "tagged streamer, but no face to find the cam" };
-    return { kind: "streamer", cam: camBox(biggest, sw, sh), why: override === "streamer" ? "tagged streamer" : `small face near the ${cx < 0.5 ? "left" : "right"} edge` };
+  const n = Math.max(1, samples.length);
+  const withFace = samples.filter((s) => s.faces.length);
+  const share = withFace.length / n;
+  const groups = spots(samples, sw, sh);
+  const edge = (g) => (g.cx < 0.3 ? "left" : g.cx > 0.7 ? "right" : g.cy < 0.3 ? "top" : g.cy > 0.7 ? "bottom" : "");
+  const cam = groups.find((g) => g.faces.length / n >= 0.2 && median(g.faces.map((f) => f.h)) / sh < 0.22 && edge(g));
+  if (cam) return { kind: "streamer", cam: camBox(cam.faces, sw, sh), why: override === "streamer" ? "tagged streamer" : `a webcam face near the ${edge(cam)} edge` };
+  if (override === "streamer") {
+    if (!groups.length) return { kind: "gameplay", why: "tagged streamer, but no face to find the cam" };
+    return { kind: "streamer", cam: camBox(groups[0].faces, sw, sh), why: "tagged streamer" };
   }
+  if (share < 0.3) return { kind: "gameplay", why: `a face in only ${Math.round(share * 100)}% of frames` };
+  const hRatio = median(withFace.map((s) => Math.max(...s.faces.map((f) => f.h)) / sh));
   return { kind: "podcast", why: `big faces (${Math.round(hRatio * 100)}% of the height)` };
 }
 
@@ -49,41 +81,75 @@ function camBox(faces, sw, sh) {
   return { x: even(x), y: even(y), w: even(w), h: even(h) };
 }
 
-// Who speaks when (podcast): for each sentence, the face whose mouth moves most; returns crop-centre keyframes.
-// Faces are told apart by where they sit across the frame (people more than 15% of the width apart = different people).
-function speakerTrack(found, sentences, clipStart) {
-  const { width: sw, samples } = found;
-  const keys = [];
-  let lastCx = sw / 2;
-  for (const s of sentences) {
-    const a = s.t0 - clipStart, b = s.t1 - clipStart;
-    const inside = samples.filter((p) => p.t >= a - 0.25 && p.t <= b + 0.25 && p.faces.length);
-    if (!inside.length) continue;
-    const seats = [];
-    for (const p of inside) {
-      for (const f of p.faces) {
-        const cx = f.x + f.w / 2;
-        let seat = seats.find((q) => Math.abs(q.cx - cx) < sw * 0.15);
-        if (!seat) seats.push((seat = { cx, talk: 0, size: 0, n: 0 }));
-        seat.cx = (seat.cx * seat.n + cx) / (seat.n + 1);
-        seat.talk += f.mouth; seat.size += f.h; seat.n++;
-      }
+// The people in one shot: faces grouped by where they sit (more than 10% of the width apart = different people),
+// leaving out faces seen only now and then or much smaller than the main one (background, half out of the frame).
+function peopleIn(shotSamples, cuts, sw) {
+  const people = [];
+  for (const p of shotSamples) {
+    for (const f of p.faces) {
+      const cx = f.x + f.w / 2;
+      let q = people.find((o) => Math.abs(median(o.xs) - cx) < sw * 0.1);
+      if (!q) people.push((q = { xs: [], hs: [], talk: [] }));
+      q.xs.push(cx);
+      q.hs.push(f.h);
+      // a mouth reading compares two frames 0.1 s apart: across a cut it means nothing
+      if (!cuts.some((c) => c > p.t && c <= p.t + 0.15)) q.talk.push({ t: p.t, mouth: f.mouth });
     }
-    const speaker = seats.length === 1 ? seats[0]
-      : seats.reduce((best, q) => (q.talk / q.n > best.talk / best.n ? q : best));
-    if (Math.abs(speaker.cx - lastCx) > sw * 0.04 || !keys.length) keys.push({ t: round(Math.max(0, a)), cx: round(speaker.cx) });
-    lastCx = speaker.cx;
   }
+  const most = Math.max(0, ...people.map((q) => q.xs.length)), tallest = Math.max(0, ...people.map((q) => median(q.hs)));
+  return people.filter((q) => q.xs.length >= most * 0.3 && median(q.hs) >= tallest * 0.6)
+    .map((q) => ({ cx: median(q.xs), n: q.xs.length, talk: q.talk })).sort((a, b) => b.n - a.n);
+}
+
+// Who talks most between a and b: the person whose mouth moves most (null when nobody was seen then).
+function talker(people, a, b) {
+  let best = null, bestScore = -1;
+  for (const q of people) {
+    const m = q.talk.filter((x) => x.t >= a - 0.25 && x.t <= b + 0.25).map((x) => x.mouth);
+    const score = m.length ? m.reduce((s, x) => s + x, 0) / m.length : -1;
+    if (score > bestScore) { best = q; bestScore = score; }
+  }
+  return bestScore >= 0 ? best : null;
+}
+
+// Where the podcast crop looks, as keyframes { t, cx, jump? } (t in seconds from clipStart). Edited podcasts cut
+// between cameras, so this works shot by shot: in each shot the crop sits on the person who is there, and when a shot
+// holds several people (a wide shot) it glides to whoever talks during each sentence. At a cut it jumps with the picture.
+function speakerTrack(found, sentences, clipStart) {
+  const { width: sw, samples, cuts = [] } = found;
+  const keys = [];
+  const add = (t, cx, jump) => {
+    if (keys.length && Math.abs(keys[keys.length - 1].cx - cx) < sw * 0.04) return; // already looking there
+    // a jump is rounded down, so the first frame of the new shot already gets the new position
+    keys.push(jump ? { t: Math.floor(Math.max(0, t) * 100 + 1e-6) / 100, cx: round(cx), jump: true } : { t: round(t), cx: round(cx) });
+  };
+  const edges = [0, ...cuts.filter((c) => c > 0).sort((a, b) => a - b)];
+  edges.forEach((a, i) => {
+    const b = i + 1 < edges.length ? edges[i + 1] : Infinity;
+    const people = peopleIn(samples.filter((p) => p.t >= a && p.t < b), cuts, sw);
+    if (!people.length) return add(a, sw / 2, true); // nobody found in this shot: the middle
+    const turns = [];
+    for (const s of people.length > 1 ? sentences : []) {
+      const s0 = Math.max(a, s.t0 - clipStart), s1 = Math.min(b, s.t1 - clipStart);
+      const p = s1 > s0 ? talker(people, s0, s1) : null;
+      if (p) turns.push({ t: s0, p });
+    }
+    if (!turns.length) turns.push({ p: talker(people, a, b) || people[0] });
+    turns.forEach((x, k) => add(k ? x.t : a, x.p.cx, k === 0));
+  });
   return keys.length ? keys : [{ t: 0, cx: round(sw / 2) }];
 }
 
-// FFmpeg expression for the crop's left edge over time: holds each position, glides 0.4 s to the next.
+// FFmpeg expression for the crop's left edge over time: holds each position, then glides 0.4 s to the next one, or
+// jumps at once at a camera cut.
 function cropXExpr(keys, cropW, sw) {
   const left = (cx) => round(clamp(cx - cropW / 2, 0, sw - cropW), 1);
   let expr = String(left(keys[keys.length - 1].cx));
   for (let i = keys.length - 1; i > 0; i--) {
     const t = keys[i].t, g = 0.4, x0 = left(keys[i - 1].cx), x1 = left(keys[i].cx);
-    expr = `if(lt(t,${t}),${x0},if(lt(t,${round(t + g)}),${x0}+(${round(x1 - x0, 1)})*(t-${t})/${g},${expr}))`;
+    const glideEnd = round(Math.min(t + g, i + 1 < keys.length ? keys[i + 1].t : Infinity));
+    expr = keys[i].jump ? `if(lt(t,${t}),${x0},${expr})`
+      : `if(lt(t,${t}),${x0},if(lt(t,${glideEnd}),${x0}+(${round(x1 - x0, 1)})*(t-${t})/${g},${expr}))`;
   }
   return expr;
 }
@@ -114,4 +180,4 @@ function videoGraph(layout, src, extra = {}) {
   };
 }
 
-module.exports = { findFaces, decide, camBox, speakerTrack, cropXExpr, videoGraph, W, H };
+module.exports = { findFaces, shotCuts, decide, camBox, speakerTrack, cropXExpr, videoGraph, W, H };

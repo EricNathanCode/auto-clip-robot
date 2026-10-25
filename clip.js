@@ -19,18 +19,19 @@ const download = require("./download");
 const VERSIONS = {
   tiktok: { span: "long", look: "pop", nudge: 0 },
   shorts: { span: "core", look: "clean", nudge: 0 },
-  reels: { span: "core", look: "box", nudge: 0.3 },
+  reels: { span: "core", look: "mint", nudge: 0.3 },
   x: { span: "core", look: "pop", nudge: -0.3 },
 };
 const PLATFORMS = Object.keys(VERSIONS);
 const isUrl = (s) => /^(https?|file):\/\//i.test(s);
 
-// Faces for a stretch of a video file, or a stand-in for tests (FAKE_FACES = a JSON file shaped like faces.py's output,
-// with times in seconds of the video file).
+// Faces (and camera cuts) for a stretch of a video file, or a stand-in for tests (FAKE_FACES = a JSON file shaped like
+// findFaces' answer, with times in seconds of the video file).
 async function facesFor(file, start, end) {
   if (process.env.FAKE_FACES) {
     const fake = JSON.parse(fs.readFileSync(process.env.FAKE_FACES, "utf8"));
-    return { ...fake, samples: fake.samples.filter((s) => s.t >= start && s.t <= end).map((s) => ({ ...s, t: round(s.t - start) })) };
+    return { ...fake, samples: fake.samples.filter((s) => s.t >= start && s.t <= end).map((s) => ({ ...s, t: round(s.t - start) })),
+      cuts: (fake.cuts || []).filter((c) => c > start && c < end).map((c) => c - start) };
   }
   return findFaces(file, start, end, 0.5);
 }
@@ -108,9 +109,10 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
       const v = VERSIONS[p], span = c[v.span];
       const start = round(clamp(span.start + v.nudge, video.offset, span.end - 5)), end = span.end;
       let keys;
-      if (layout.kind === "podcast" && faces) { // speaker keyframes, with face times moved to this version's start
+      if (layout.kind === "podcast" && faces) { // speaker keyframes, with face and cut times moved to this version's start
         const shift = c.long.start - start;
-        const shifted = { ...faces, samples: faces.samples.map((s) => ({ ...s, t: round(s.t + shift) })) };
+        const shifted = { ...faces, samples: faces.samples.map((s) => ({ ...s, t: round(s.t + shift) })),
+          cuts: (faces.cuts || []).map((t) => t + shift) };
         keys = speakerTrack(shifted, c.speech.sentences.filter((s) => s.t1 > start && s.t0 < end), start);
       }
       const name = `${String(i + 1).padStart(2, "0")}-${p}`;

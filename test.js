@@ -10,8 +10,8 @@ const { TOOLS, run, probe } = require("./tools");
 const { excitement, pickPeaks, loudness, STEP } = require("./moments");
 const { fromWhisper, transcribe } = require("./speech");
 const { fitSpan, pickClips, prompt, plain } = require("./brain");
-const { decide, camBox, speakerTrack, cropXExpr, findFaces } = require("./layout");
-const { chunks, buildAss } = require("./captions");
+const { decide, camBox, speakerTrack, cropXExpr, findFaces, shotCuts } = require("./layout");
+const { chunks, buildAss, LOOKS } = require("./captions");
 const { clipVideo } = require("./clip");
 const download = require("./download");
 
@@ -108,10 +108,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const fakeWhisper = { transcription: [
     { text: " Okay chat, listen.", tokens: [{ text: "[_BEG_]", offsets: { from: 0, to: 0 } }, { text: " Okay", offsets: { from: 0, to: 400 } },
       { text: " chat", offsets: { from: 400, to: 700 } }, { text: ",", offsets: { from: 700, to: 720 } }, { text: " list", offsets: { from: 720, to: 900 } },
-      { text: "en", offsets: { from: 900, to: 1100 } }, { text: ".", offsets: { from: 1100, to: 1150 } }, { text: "[_TT_57]", offsets: { from: 1150, to: 1150 } }] },
+      { text: "en", offsets: { from: 900, to: 1100 } }, { text: ".", offsets: { from: 1100, to: 1150 } }, { text: " -", offsets: { from: 1150, to: 1150 } },
+      { text: "[_TT_57]", offsets: { from: 1150, to: 1150 } }] },
     { text: " [Music]", tokens: [{ text: " [Music]", offsets: { from: 2000, to: 4000 } }] }] };
   const parsed = fromWhisper(fakeWhisper, 100);
-  check(parsed.words.map((w) => w.w).join("|") === "Okay|chat,|listen.", `joins word pieces + punctuation, skips special tokens (${parsed.words.map((w) => w.w).join(" ")})`);
+  check(parsed.words.map((w) => w.w).join("|") === "Okay|chat,|listen.", `joins word pieces + punctuation, skips special tokens and lone dashes (${parsed.words.map((w) => w.w).join(" ")})`);
   check(parsed.words[0].t0 === 100 && parsed.words[2].t1 === 101.15, "word times are moved to the stream's clock");
   check(parsed.music === true && parsed.sentences.length === 1, "notices [Music] and keeps it out of the captions");
 
@@ -140,6 +141,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(keys.length === 2 && keys[0].cx < 960 && keys[1].cx > 960, `follows whoever talks: left, then right (${keys.map((k) => k.cx).join(" → ")})`);
   const expr = cropXExpr(keys, 608, 1920);
   check(/^if\(lt\(t,11\),/.test(expr) && expr.includes("(t-11)/0.4"), "the crop glides to the new speaker in 0.4 s");
+  const game = { width: 1920, height: 1080, samples: [] }; // a webcam top-left (seen 60% of the time) + a game character
+  for (let t = 0; t < 20; t += 0.5) {
+    game.samples.push({ t, faces: [...(t % 5 < 3 ? [{ x: 120, y: 200, w: 110, h: 130, mouth: 0.1 }] : []),
+      { x: 700 + (t % 4) * 60, y: 300 + (t % 3) * 40, w: 260, h: 320, mouth: 0 }] });
+  }
+  const gl = decide(game);
+  check(gl.kind === "streamer" && gl.cam.x < 400, `finds the webcam, not the game character in the middle (${gl.why})`);
+  const cut = { width: 1920, height: 1080, cuts: [5.02], samples: [] }; // camera 1 shows the left person, camera 2 the right
+  for (let t = 0; t < 10; t += 0.5) cut.samples.push({ t, faces: [t < 5 ? { x: 300, y: 200, w: 300, h: 380, mouth: 0.1 } : { x: 1300, y: 200, w: 300, h: 380, mouth: 0.1 }] });
+  cut.samples.push({ t: 7, faces: [{ x: 1700, y: 100, w: 150, h: 160, mouth: 0.3 }] }); // a face seen once, in the background
+  const cutKeys = speakerTrack(cut, [{ t0: 0, t1: 10 }], 0);
+  check(cutKeys.length === 2 && cutKeys[1].jump && cutKeys[1].t === 5.02 && cutKeys[1].cx === 1450,
+    `at a camera cut the crop jumps to the face in the new shot (${cutKeys.map((k) => `${k.t}s→${k.cx}`).join(", ")})`);
+  const cutExpr = cropXExpr(cutKeys, 608, 1920);
+  check(cutExpr.startsWith("if(lt(t,5.02),") && !cutExpr.includes("/0.4"), "a jump has no glide");
 
   console.log("\n--- CAPTIONS (no tools) ---");
   const ws = "this is a test of the caption robot today. okay".split(" ").map((w, i) => ({ w, t0: 10 + i * 0.3, t1: 10.25 + i * 0.3 }));
@@ -149,6 +165,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const ass = buildAss({ words: [...ws, { w: "{\\bad}", t0: 12.8, t1: 13 }], clipStart: 10, clipEnd: 14, hook: "Hook Here", credit: "@someone" });
   check(ass.includes("Hook Here") && ass.includes("@someone") && ass.includes("Style: Cap,Fredoka"), "the subtitle file has the hook, the credit and the Fredoka style");
   check(!ass.includes("{\\bad}") && /Dialogue: 1,0:00:00.00,/.test(ass), "caption times start at the clip's start, and braces in words can't inject styles");
+  const dash = buildAss({ words: [{ w: "in,", t0: 1, t1: 1.3 }, { w: "-", t0: 1.3, t1: 1.4 }], clipStart: 0, clipEnd: 3, look: "mint" });
+  check(!/ -|-\{|\}-/.test(dash.split("[Events]")[1]) && Object.keys(LOOKS).every((k) => !/^Style: Cap(,[^,]*){14},3,/m.test(buildAss({ words: [], clipStart: 0, clipEnd: 1, look: k }))),
+    "a lone dash is never shown, and no caption look darkens the picture with a box");
 
   console.log("\n--- TOOLS: LOUDNESS, SPEECH, FACES ---");
   const { voice, stream } = await makeStream(scratch);
@@ -167,6 +186,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     && /vcodec\^=avc1/.test(download.VIDEO), "YouTube gets one whole H.264 download; other sites try just the minutes first");
   const faces = await findFaces(stream, 10, 14, 1);
   check(faces.width === 1280 && faces.samples.length >= 3 && faces.samples.every((s) => s.faces.length === 0), "the face finder runs (and sees no face in a test pattern)");
+  const twoShots = path.join(scratch, "two-shots.mp4"); // 3 s of one "camera", then 3 s of another
+  await ff("-f", "lavfi", "-i", "color=c=0x8B5CF6:s=320x180:r=30:d=3", "-f", "lavfi", "-i", "color=c=0xFDE68A:s=320x180:r=30:d=3",
+    "-filter_complex", "[0][1]concat=n=2:v=1:a=0", "-c:v", "libx264", "-preset", "ultrafast", twoShots);
+  const shots = await shotCuts(twoShots, 1, 6);
+  check(shots.length === 1 && near(shots[0], 2, 0.05), `finds the camera cut, timed from the clip's start (${shots.join(", ")} s)`);
 
   console.log("\n--- THE BRAIN (a fake Ollama) ---");
   const asked = prompt(words.sentences, { long: [61, 70], core: [30, 60] });

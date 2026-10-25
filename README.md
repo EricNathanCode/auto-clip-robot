@@ -15,9 +15,10 @@ link (YouTube / Twitch) or uploaded footage
   → 🧠 brain.js     the local AI scores each moment, picks the long cut + a shorter core cut (by sentence number,
                      never by timestamp), writes a hook title and a caption; falls back to loudness if the AI is off.
                      Hooks must be true (no exaggeration about real people), banned topics score 1, emojis are removed
-  → ⬇️ download.js  only the chosen minutes are downloaded in good quality (never the 3-hour video)
-  → 🙂 layout.js    OpenCV YuNet finds faces: 🎮 streamer (cam on top, gameplay below) · 🎙️ podcast (crop follows
-                     whoever's mouth moves, gliding between sentences) · 🕹️ gameplay (blurred background)
+  → ⬇️ download.js  the picture in H.264 (YouTube: the whole video once, cut locally; elsewhere just the chosen minutes)
+  → 🙂 layout.js    OpenCV YuNet finds faces: 🎮 streamer (the face that stays put near an edge = the webcam → cam on
+                     top, gameplay below) · 🎙️ podcast (shot by shot: the crop jumps with every camera cut and, in a
+                     wide shot, glides to whoever's mouth moves) · 🕹️ gameplay (blurred background)
   → 🎬 render.js    FFmpeg: layout + ASS captions (Fredoka) + hook + credit, loudness to -14 LUFS, H.264 MP4
 ```
 
@@ -26,7 +27,7 @@ link (YouTube / Twitch) or uploaded footage
 |---|---|---|
 | TikTok | long (61–70 s, over 1 minute) | pop (uppercase, yellow word) |
 | YouTube Shorts | core (30–60 s) | clean (pink word) |
-| Instagram Reels | core, starts 0.3 s later | box |
+| Instagram Reels | core, starts 0.3 s later | mint (uppercase, mint-green word) |
 | X | core, starts 0.3 s earlier | pop |
 
 A campaign's own length rule replaces the defaults. Different cuts and looks mean cross-posting never looks like a duplicate.
@@ -52,7 +53,7 @@ time, and the big source file is deleted as soon as the clips are made.
 - yt-dlp updates itself daily (YouTube changes often).
 
 ## Tests
-`node test.js <scratchDir>`: **55 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
+`node test.js <scratchDir>`: **60 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
 voice and two hype moments), a fake Ollama, fake faces for the podcast layout, the whole job API, and a file:// link
 through yt-dlp. On the Dell: `docker run --rm -v /opt/autoclip/test.js:/app/test.js autoclip node test.js /tmp/autoclip-test`
 

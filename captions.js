@@ -6,11 +6,12 @@ const { round } = require("./tools");
 
 const W = 1080, H = 1920;
 // ASS colours are &HAABBGGRR (alpha, blue, green, red).
-const WHITE = "&H00FFFFFF", BLACK = "&H00000000", YELLOW = "&H004DE1FF", PINK = "&H00B672F4", PURPLE = "&H00F65C8B";
+// No look puts a dark box behind the words: a box darkens the picture under it.
+const WHITE = "&H00FFFFFF", BLACK = "&H00000000", YELLOW = "&H004DE1FF", PINK = "&H00B672F4", MINT = "&H00B4F07A";
 const LOOKS = {
-  pop: { upper: true, size: 84, colour: WHITE, highlight: YELLOW, border: 1, outline: 7, back: "&H64000000" },
-  clean: { upper: false, size: 80, colour: WHITE, highlight: PINK, border: 1, outline: 6, back: "&H64000000" },
-  box: { upper: true, size: 76, colour: WHITE, highlight: YELLOW, border: 3, outline: 12, back: "&H96000000" },
+  pop: { upper: true, size: 84, colour: WHITE, highlight: YELLOW, outline: 7 },
+  clean: { upper: false, size: 80, colour: WHITE, highlight: PINK, outline: 6 },
+  mint: { upper: true, size: 78, colour: WHITE, highlight: MINT, outline: 9 },
 };
 const MAX_WORDS = 3, MAX_CHARS = 16;
 
@@ -48,7 +49,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Cap,Fredoka,${look.size},${look.colour},${look.colour},${look.border === 3 ? look.back : BLACK},${look.back},-1,0,0,0,100,100,0,0,${look.border},${look.outline},2,5,60,60,0,1
+Style: Cap,Fredoka,${look.size},${look.colour},${look.colour},${BLACK},&H64000000,-1,0,0,0,100,100,0,0,1,${look.outline},2,5,60,60,0,1
 Style: Hook,Fredoka,72,${BLACK},${BLACK},${WHITE},${WHITE},-1,0,0,0,100,100,0,0,3,18,0,8,90,90,${hookY},1
 Style: Credit,Fredoka SemiBold,36,&H33FFFFFF,&H33FFFFFF,${BLACK},${BLACK},0,0,0,0,100,100,0,0,1,3,0,1,60,60,430,1
 
@@ -63,7 +64,7 @@ function buildAss({ words, clipStart, clipEnd, look = "pop", hook = "", credit =
   const lines = [];
   const inClip = words.filter((w) => w.t1 > clipStart && w.t0 < clipEnd)
     .map((w) => ({ w: clean(L.upper ? w.w.toUpperCase() : w.w), t0: w.t0 - clipStart, t1: w.t1 - clipStart }))
-    .filter((w) => w.w);
+    .filter((w) => /[\p{L}\p{N}]/u.test(w.w)); // a lone "-" or "..." is not a word to show
   const groups = chunks(inClip);
   groups.forEach((g, gi) => {
     const next = groups[gi + 1];
@@ -71,9 +72,8 @@ function buildAss({ words, clipStart, clipEnd, look = "pop", hook = "", credit =
     g.forEach((word, k) => {
       const a = word.t0, b = k < g.length - 1 ? g[k + 1].t0 : groupEnd;
       if (b - a < 0.02) return;
-      // The spoken word is coloured (and a bit bigger, except in the box look, where a bigger word breaks the box).
-      const big = L.border === 3 ? "" : "\\fscx115\\fscy115";
-      const text = g.map((x, j) => (j === k ? `{\\c${L.highlight}${big}}${x.w}{\\r}` : x.w)).join(" ");
+      // The spoken word is coloured and a bit bigger.
+      const text = g.map((x, j) => (j === k ? `{\\c${L.highlight}\\fscx115\\fscy115}${x.w}{\\r}` : x.w)).join(" ");
       lines.push(`Dialogue: 1,${ts(a)},${ts(b)},Cap,,0,0,0,,{\\an5\\pos(${W / 2},${captionY})}${text}`);
     });
   });

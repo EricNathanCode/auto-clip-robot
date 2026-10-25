@@ -1,6 +1,8 @@
 """Finds faces in a stretch of video with OpenCV's tiny YuNet model (CPU, no graphics card needed).
 
-Usage: python faces.py <video> <start s> <end s> <every s> <yunet.onnx>
+Usage: python faces.py <video> <start s> <end s> <every s> <yunet.onnx> [extra times]
+"extra times" = more moments to look at, in seconds from start, comma-separated (e.g. just after each camera cut,
+so even a short shot gets its face found).
 Prints JSON: {"width": W, "height": H, "samples": [{"t": seconds from start, "faces": [{"x","y","w","h","score","mouth"}]}]}
 "mouth" = how much the mouth area changes over the next ~0.1 s (talking moves the mouth); used to find who speaks.
 """
@@ -37,6 +39,7 @@ def mouth_motion(a, b, box):
 
 def main():
     video, start, end, every, model = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4]), sys.argv[5]
+    extra = [float(x) for x in sys.argv[6].split(",") if x] if len(sys.argv) > 6 else []
     cap = cv2.VideoCapture(video)
     if not cap.isOpened():
         raise SystemExit(f"can't open {video}")
@@ -46,9 +49,14 @@ def main():
     dw, dh = int(round(W / scale)), int(round(H / scale))
     det = cv2.FaceDetectorYN.create(model, "", (dw, dh), 0.8, 0.3, 50)
     ahead = max(1, int(round(fps * 0.1)))  # frames in ~0.1 s
-    samples = []
+    times = []
     t = start
     while t < end:
+        times.append(round(t, 3))
+        t += every
+    times = sorted(set(times + [round(start + x, 3) for x in extra if 0 <= x < end - start]))
+    samples = []
+    for t in times:
         cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
         ok, frame = cap.read()
         if not ok:
@@ -66,7 +74,6 @@ def main():
             faces.append({"x": round(x), "y": round(y), "w": round(w), "h": round(h), "score": round(float(f[14]), 3),
                           "mouth": round(mouth_motion(frame, later, mouth_box(f, scale)), 4)})
         samples.append({"t": round(t - start, 2), "faces": faces})
-        t += every
     print(json.dumps({"width": W, "height": H, "samples": samples}))
 
 

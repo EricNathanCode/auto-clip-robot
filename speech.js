@@ -23,7 +23,9 @@ async function transcribe(file, start, end, workDir) {
 }
 
 // Whisper gives tokens (pieces of words). A token that starts with a space begins a new word; the others (and
-// punctuation) stick to the word before. Special tokens like [_BEG_] are skipped.
+// punctuation) stick to the word before. Special tokens like [_BEG_] and the lone dash Whisper writes when someone
+// breaks off mid-sentence ("we were in, -") are skipped.
+const HAS_LETTER = /[\p{L}\p{N}]/u;
 function fromWhisper(json, offset = 0) {
   const words = [], sentences = [];
   let music = false;
@@ -33,8 +35,9 @@ function fromWhisper(json, offset = 0) {
     for (const tok of seg.tokens || []) {
       const text = tok.text;
       if (!text || /^\[_/.test(text.trim()) || /^<\|.*\|>$/.test(text.trim())) continue; // [_BEG_], [_TT_150], <|endoftext|>
+      if (/^\s+[-–—]+\s*$/.test(text)) continue;
       const t0 = round(offset + tok.offsets.from / 1000), t1 = round(offset + tok.offsets.to / 1000);
-      if (/^\s/.test(text) || !words.length || words.length === first && !/^[.,!?;:'"]/.test(text)) {
+      if ((/^\s/.test(text) && HAS_LETTER.test(text)) || !words.length || words.length === first && HAS_LETTER.test(text)) {
         words.push({ w: text.trim(), t0, t1 });
       } else {
         const last = words[words.length - 1];
@@ -42,7 +45,7 @@ function fromWhisper(json, offset = 0) {
         last.t1 = Math.max(last.t1, t1);
       }
     }
-    const segWords = words.splice(first).filter((w) => w.w && !SOUND_LABEL.test(w.w));
+    const segWords = words.splice(first).filter((w) => HAS_LETTER.test(w.w) && !SOUND_LABEL.test(w.w));
     words.push(...segWords);
     if (segWords.length) {
       sentences.push({ text: segWords.map((w) => w.w).join(" "), t0: segWords[0].t0, t1: segWords[segWords.length - 1].t1,
