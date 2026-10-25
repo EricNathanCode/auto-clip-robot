@@ -9,7 +9,7 @@ const path = require("path");
 const { probe, round, clamp } = require("./tools");
 const { findMoments } = require("./moments");
 const { transcribe } = require("./speech");
-const { pickClips } = require("./brain");
+const { pickClips, lengthen, LENGTHS } = require("./brain");
 const { findFaces, decide, speakerTrack } = require("./layout");
 const { renderVersion } = require("./render");
 const download = require("./download");
@@ -27,13 +27,13 @@ const isUrl = (s) => /^(https?|file):\/\//i.test(s);
 
 // Faces (and camera cuts) for a stretch of a video file, or a stand-in for tests (FAKE_FACES = a JSON file shaped like
 // findFaces' answer, with times in seconds of the video file).
-async function facesFor(file, start, end) {
+async function facesFor(file, start, end, every = 0.5, opts) {
   if (process.env.FAKE_FACES) {
     const fake = JSON.parse(fs.readFileSync(process.env.FAKE_FACES, "utf8"));
     return { ...fake, samples: fake.samples.filter((s) => s.t >= start && s.t <= end).map((s) => ({ ...s, t: round(s.t - start) })),
       cuts: (fake.cuts || []).filter((c) => c > start && c < end).map((c) => c - start) };
   }
-  return findFaces(file, start, end, 0.5);
+  return findFaces(file, start, end, every, opts);
 }
 
 // mustInclude: text a campaign requires in every post description (e.g. "#ad" + a line about the show).
@@ -47,14 +47,14 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   if (!platforms.length) throw new Error(`no known platform (use: ${PLATFORMS.join(", ")})`);
 
   // Where the sound comes from, and how to get the picture for a chosen clip.
-  let analysis, getVideo, clues = [];
+  let analysis, getVideo, clues = [], game = "";
   if (isUrl(source)) {
     log("step: reading the video's info");
     const meta = await download.info(source);
     if (meta.live) throw new Error("this stream is still live: it can be clipped after it ends");
-    who = who || meta.who; title = title || meta.title;
+    who = who || meta.who; title = title || meta.title; game = meta.game;
     clues = download.heatClues(meta.heatmap);
-    log(`video: "${meta.title}" by ${meta.who}, ${round(meta.duration / 60, 1)} min${clues.length ? `, ${clues.length} most-replayed peaks` : ""}`);
+    log(`video: "${meta.title}" by ${meta.who}, ${round(meta.duration / 60, 1)} min${game ? `, game: ${game}` : ""}${clues.length ? `, ${clues.length} most-replayed peaks` : ""}`);
     log("step: downloading the audio only");
     analysis = await download.audioOnly(source, path.join(workDir, "audio"));
     getVideo = async (c, i) => {
@@ -89,9 +89,18 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   }
   const usable = moments.filter((m) => m.speech.words.length >= 8 && !m.speech.music); // music underneath = copyright claims
   log(`step: the brain picks the best ${count} of ${usable.length}`);
-  const { clips, note } = await pickClips(usable, { who, title, kind: tag === "podcast" ? "podcast" : "livestream", count, long, core,
+  const { clips, note } = await pickClips(usable, { who, title, game, kind: tag === "podcast" ? "podcast" : "livestream", count, long, core,
     ...(avoid ? { avoid } : {}), log });
   if (!clips.length) throw new Error("no moment with enough speech (and no music underneath) was found");
+  // TikTok's long cut opens like the others and only runs on: if the written-down window ends too soon for that,
+  // write down the next 45 s too (only for the chosen clips).
+  const longLen = long || LENGTHS.long;
+  for (const [i, c] of clips.entries()) {
+    if (!platforms.some((p) => VERSIONS[p].span === "long") || c.long.end - c.long.start >= longLen[0] || c.until >= sound.duration - 1) continue;
+    log(`step: writing down what comes next, so clip ${i + 1} runs over ${longLen[0]} s on TikTok`);
+    const more = await transcribe(analysis, c.until, Math.min(sound.duration, c.until + 45), workDir);
+    if (!more.music) clips[i] = lengthen(c, more, { long: longLen }); // music underneath: stay shorter, no claim
+  }
 
   const outputs = [];
   let layout;
@@ -102,7 +111,11 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
     const faces = !cam && (!layout || layout.kind === "podcast")
       ? await facesFor(video.file, c.long.start - video.offset, c.long.end - video.offset) : null;
     if (!layout) { // decided once, on the first clip
-      layout = cam ? { kind: "streamer", cam, why: "cam box given" } : decide(faces, tag === "auto" ? null : tag);
+      // With the whole video on disk, judge from 90 looks spread across all of it: a webcam stays in its spot the
+      // whole stream, while game characters come and go (one standing still during a clip once fooled it).
+      const whole = !cam && tag !== "podcast" && video.offset === 0 && src.duration > 3 * (c.long.end - c.long.start)
+        ? await facesFor(video.file, 0, src.duration, src.duration / 90, { cuts: false }) : faces;
+      layout = cam ? { kind: "streamer", cam, why: "cam box given" } : decide(whole, tag === "auto" ? null : tag);
       log(`layout: ${layout.kind} (${layout.why})`);
     }
     for (const p of platforms) {

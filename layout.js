@@ -10,8 +10,9 @@ const W = 1080, H = 1920;
 const even = (x) => Math.round(x / 2) * 2;
 
 // Faces between start and end of a video file, plus its camera cuts; all times in seconds from `start`.
-async function findFaces(file, start, end, every = 0.5) {
-  const cuts = await shotCuts(file, start, end);
+// { cuts: false } skips the cut search (for a quick look across a whole video).
+async function findFaces(file, start, end, every = 0.5, { cuts: wantCuts = true } = {}) {
+  const cuts = wantCuts ? await shotCuts(file, start, end) : [];
   const after = cuts.map((c) => round(c + 0.15)).filter((t) => t < end - start).join(","); // a look into every shot
   const out = await run(TOOLS.python(), [path.join(__dirname, "faces.py"), file, String(start), String(end),
     String(every), TOOLS.faceModel(), ...(after ? [after] : [])]);
@@ -57,7 +58,8 @@ function decide(found, override) {
   const withFace = samples.filter((s) => s.faces.length);
   const share = withFace.length / n;
   const groups = spots(samples, sw, sh);
-  const edge = (g) => (g.cx < 0.3 ? "left" : g.cx > 0.7 ? "right" : g.cy < 0.3 ? "top" : g.cy > 0.7 ? "bottom" : "");
+  // Webcams sit in a side strip; a game character standing still near the top-middle is not one.
+  const edge = (g) => (g.cx < 0.3 ? "left" : g.cx > 0.7 ? "right" : "");
   const cam = groups.find((g) => g.faces.length / n >= 0.2 && median(g.faces.map((f) => f.h)) / sh < 0.22 && edge(g));
   if (cam) return { kind: "streamer", cam: camBox(cam.faces, sw, sh), why: override === "streamer" ? "tagged streamer" : `a webcam face near the ${edge(cam)} edge` };
   if (override === "streamer") {

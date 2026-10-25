@@ -23,6 +23,7 @@ async function info(url) {
   return {
     title: j.title || "", who: j.uploader || j.channel || "", duration: Number(j.duration) || 0,
     live: !!j.is_live, url: j.webpage_url || url, heatmap: heat,
+    game: ((/^\s*game:\s*(.+)$/im.exec(j.description || "") || [])[1] || "").trim().slice(0, 60), // "Game: The Masterplan"
   };
 }
 

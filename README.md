@@ -25,7 +25,7 @@ link (YouTube / Twitch) or uploaded footage
 ## One version per platform
 | Platform | Cut | Caption look |
 |---|---|---|
-| TikTok | long (61–70 s, over 1 minute) | pop (uppercase, yellow word) |
+| TikTok | long (61–70 s, over 1 minute): same opening as the others, it just runs on | pop (uppercase, yellow word) |
 | YouTube Shorts | core (30–60 s) | clean (pink word) |
 | Instagram Reels | core, starts 0.3 s later | mint (uppercase, mint-green word) |
 | X | core, starts 0.3 s earlier | pop |
@@ -53,7 +53,7 @@ time, and the big source file is deleted as soon as the clips are made.
 - yt-dlp updates itself daily (YouTube changes often).
 
 ## Tests
-`node test.js <scratchDir>`: **60 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
+`node test.js <scratchDir>`: **63 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
 voice and two hype moments), a fake Ollama, fake faces for the podcast layout, the whole job API, and a file:// link
 through yt-dlp. On the Dell: `docker run --rm -v /opt/autoclip/test.js:/app/test.js autoclip node test.js /tmp/autoclip-test`
 

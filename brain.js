@@ -13,26 +13,27 @@ const SCHEMA = {
   type: "object",
   properties: {
     score: { type: "integer", minimum: 1, maximum: 10 },
-    start: { type: "integer" }, end: { type: "integer" },
-    core_start: { type: "integer" }, core_end: { type: "integer" },
+    start: { type: "integer" }, core_end: { type: "integer" }, end: { type: "integer" },
     hook: { type: "string" }, caption: { type: "string" }, why: { type: "string" },
   },
-  required: ["score", "start", "end", "core_start", "core_end", "hook", "caption", "why"],
+  required: ["score", "start", "core_end", "end", "hook", "caption", "why"],
 };
 
 // Topics brands won't pay for (and campaigns ban). A campaign can replace the list.
 const AVOID = "politics, religion, drugs, violence, sex or adult topics, hate";
 
-function prompt(sentences, { who, title, kind, long, core, avoid = AVOID }) {
+// game: what's being played (from the video's description), so captions name the game instead of "the livestream".
+function prompt(sentences, { who, title, kind, game, long, core, avoid = AVOID }) {
   const lines = sentences.map((s, i) => `[${i}] (${round(s.t1 - s.t0, 1)}s) ${s.text}`).join("\n");
-  return `You cut viral short clips (TikTok, YouTube Shorts, Reels) from a ${kind || "livestream"}${who ? ` by ${who}` : ""}${title ? ` titled "${title}"` : ""}.
+  return `You cut viral short clips (TikTok, YouTube Shorts, Reels) from a ${kind || "livestream"}${who ? ` by ${who}` : ""}${game ? ` playing the game ${game}` : ""}${title ? ` titled "${title}"` : ""}.
 Here is what was said around one possible moment, as numbered sentences with their length:
 ${lines}
 
 Decide:
 - score: 1-10, how likely this moment is to go viral on its own (funny, surprising, emotional, hype, a great story or hot take = high; boring, filler, needs outside context = low). If the moment is mainly about ${avoid}, the score is 1.
-- start/end: the sentence numbers of the LONG clip (about ${long[0]}-${long[1]} seconds in total). Start on the line that makes people stop scrolling, not on filler. End on a complete thought or the reaction, never mid-story.
-- core_start/core_end: a SHORTER clip inside it (about ${core[0]}-${core[1]} seconds) with the same hook and the best part.
+- start: the sentence number the clip opens on: the line that makes people stop scrolling, not filler. Every version starts here.
+- core_end: where the SHORT version ends (about ${core[0]}-${core[1]} seconds after start), on a complete thought or the reaction.
+- end: where the LONG version ends (about ${long[0]}-${long[1]} seconds after start): the same clip, just running on. Never end mid-story.
 - hook: a title shown on screen for the first seconds, max 6 words. It must be TRUE to what is said: no exaggeration, no shocking labels or claims about real people, no clickbait that misleads. Make people curious with what really happens. No hashtags, no emojis.
 - caption: a post caption, max 120 characters, true to the clip, no hashtags, no emojis.
 - why: max 15 words.
@@ -68,22 +69,26 @@ async function brainProblem() {
 const spanOf = (sentences, a, b) => ({ start: sentences[a].t0, end: round(sentences[b].t1 + 0.25) });
 const lengthOf = (sentences, a, b) => sentences[b].t1 + 0.25 - sentences[a].t0;
 
-// Grows or shrinks [a, b] (sentence numbers) until its length is inside [lo, hi], staying inside [minA, maxB].
-// Grows forward first (keeps the hook), then backward; shrinks from the end first (keeps the hook). Whole sentences
-// only, so when no cut lands inside the range it stays a little LONG rather than short (TikTok pays only over 1 min).
-function fitSpan(sentences, a, b, [lo, hi], minA = 0, maxB = sentences.length - 1) {
+// Grows or shrinks [a, b] (sentence numbers) until its length is inside [lo, hi], with a staying inside [minA, maxA]
+// and b at most maxB. Grows forward first (keeps the hook), then backward; shrinks from the end first (keeps the hook).
+// Whole sentences only, so when no cut lands inside the range it stays a little LONG rather than short (TikTok pays
+// only over 1 min).
+function fitSpan(sentences, a, b, [lo, hi], minA = 0, maxB = sentences.length - 1, maxA = maxB) {
   const len = (x, y) => lengthOf(sentences, x, y);
-  a = clamp(a, minA, maxB); b = clamp(b, a, maxB);
+  a = clamp(a, minA, Math.min(maxA, maxB)); b = clamp(b, a, maxB);
   while (len(a, b) < lo && (b < maxB || a > minA)) {
     if (b < maxB) b++; else a--;
   }
   while (len(a, b) > hi && b > a) {
     if (len(a, b - 1) >= lo) b--;
-    else if (len(a + 1, b) >= lo) a++;
+    else if (a < maxA && len(a + 1, b) >= lo) a++;
     else break;
   }
   return [a, b];
 }
+
+// The long cut from the core's first sentence: same opening, it only runs on longer.
+const longFrom = (sentences, a, b, lengths) => fitSpan(sentences, a, b, lengths.long, a, sentences.length - 1, a);
 
 // The first sentence after `t` seconds (or the last one).
 const sentenceAt = (sentences, t) => Math.max(0, sentences.findIndex((s) => s.t1 >= t));
@@ -93,14 +98,13 @@ async function planMoment(cand, ctx) {
   const sentences = cand.speech.sentences;
   const lengths = { long: ctx.long || LENGTHS.long, core: ctx.core || LENGTHS.core };
   if (!sentences.length) return null; // nothing said: no captions, no story (skip)
-  let a = sentenceAt(sentences, cand.peak - 20), b = sentenceAt(sentences, cand.peak + 10);
-  let ca = a, cb = b, hook = "", caption = "", why = "", score = Math.round(clamp(cand.score, 1, 10)), by = "loudness";
+  let a = sentenceAt(sentences, cand.peak - 20), cb = sentenceAt(sentences, cand.peak + 10), b = cb;
+  let hook = "", caption = "", why = "", score = Math.round(clamp(cand.score, 1, 10)), by = "loudness";
   if (!ctx.brainProblem) {
     try {
       const ans = await askBrain(prompt(sentences, { ...ctx, ...lengths }));
       const last = sentences.length - 1;
-      a = clamp(ans.start | 0, 0, last); b = clamp(ans.end | 0, a, last);
-      ca = clamp(ans.core_start | 0, a, b); cb = clamp(ans.core_end | 0, ca, b);
+      a = clamp(ans.start | 0, 0, last); cb = clamp(ans.core_end | 0, a, last); b = clamp(ans.end | 0, cb, last);
       hook = plain(ans.hook); caption = plain(ans.caption); why = String(ans.why || "").trim();
       score = clamp(ans.score | 0, 1, 10);
       by = "brain";
@@ -108,18 +112,32 @@ async function planMoment(cand, ctx) {
       ctx.log?.(`brain failed on the moment at ${cand.peak}s: ${e.message}`);
     }
   }
-  [a, b] = fitSpan(sentences, a, b, lengths.long);
-  [ca, cb] = fitSpan(sentences, Math.max(ca, a), Math.min(cb, b), lengths.core, a, b);
+  // Every version opens on the same line (the best intro); TikTok's long cut only runs on longer. When the
+  // written-down window ends too soon for that, clip.js writes down what comes next and calls lengthen().
+  [a, cb] = fitSpan(sentences, a, cb, lengths.core);
+  [, b] = longFrom(sentences, a, Math.max(b, cb), lengths);
   if (!hook) hook = sentences[a].words.slice(0, 6).map((w) => w.w).join(" ").replace(/[.,!?;:]+$/, "");
   return {
     peak: cand.peak, score, by, reasons: cand.reasons,
     long: { ...spanOf(sentences, a, b), sentences: [a, b] },
-    core: { ...spanOf(sentences, ca, cb), sentences: [ca, cb] },
+    core: { ...spanOf(sentences, a, cb), sentences: [a, cb] },
     hook: hook.split(/\s+/).slice(0, 6).join(" "),
     caption: caption.slice(0, 120) || sentences[a].text.slice(0, 120),
     why,
     speech: cand.speech, // words + sentences, for captions and for following the speaker
+    until: cand.end, // where the written-down window ends
   };
+}
+
+// Adds speech written down after the window (more = transcribe's answer) and refits the long cut from the same start.
+function lengthen(plan, more, lengths) {
+  const old = plan.speech, after = old.words.length ? old.words[old.words.length - 1].t1 : 0;
+  const words = [...old.words, ...more.words.filter((w) => w.t0 >= after)];
+  const sentences = [...old.sentences, ...more.sentences.filter((s) => s.t0 >= after)];
+  const a = plan.long.sentences[0];
+  const [, b] = longFrom(sentences, a, plan.long.sentences[1], lengths);
+  return { ...plan, speech: { ...old, words, sentences }, long: { ...spanOf(sentences, a, b), sentences: [a, b] },
+    until: more.words.length ? more.words[more.words.length - 1].t1 : plan.until };
 }
 
 // Plans every candidate, then keeps the best `count` that don't overlap much.
@@ -140,4 +158,4 @@ async function pickClips(candidates, ctx = {}) {
   return { clips: chosen.sort((x, y) => x.long.start - y.long.start), note: ctx.brainProblem || "" };
 }
 
-module.exports = { pickClips, planMoment, fitSpan, brainProblem, prompt, plain, LENGTHS, SCHEMA, AVOID };
+module.exports = { pickClips, planMoment, lengthen, fitSpan, brainProblem, prompt, plain, LENGTHS, SCHEMA, AVOID };

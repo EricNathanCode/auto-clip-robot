@@ -9,7 +9,7 @@ const { spawn } = require("child_process");
 const { TOOLS, run, probe } = require("./tools");
 const { excitement, pickPeaks, loudness, STEP } = require("./moments");
 const { fromWhisper, transcribe } = require("./speech");
-const { fitSpan, pickClips, prompt, plain } = require("./brain");
+const { fitSpan, pickClips, lengthen, prompt, plain } = require("./brain");
 const { decide, camBox, speakerTrack, cropXExpr, findFaces, shotCuts } = require("./layout");
 const { chunks, buildAss, LOOKS } = require("./captions");
 const { clipVideo } = require("./clip");
@@ -115,6 +115,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(parsed.words.map((w) => w.w).join("|") === "Okay|chat,|listen.", `joins word pieces + punctuation, skips special tokens and lone dashes (${parsed.words.map((w) => w.w).join(" ")})`);
   check(parsed.words[0].t0 === 100 && parsed.words[2].t1 === 101.15, "word times are moved to the stream's clock");
   check(parsed.music === true && parsed.sentences.length === 1, "notices [Music] and keeps it out of the captions");
+  const dtw = fromWhisper({ transcription: [{ text: " Hello there.", tokens: [{ text: " Hello", offsets: { from: 0, to: 900 }, t_dtw: 52 },
+    { text: " there", offsets: { from: 900, to: 1400 }, t_dtw: 98 }, { text: ".", offsets: { from: 1400, to: 1450 }, t_dtw: 120 }] }] }, 10);
+  check(dtw.words[0].t0 === 10.3 && dtw.words[1].t0 === 10.76 && dtw.words[0].t1 <= dtw.words[1].t0,
+    `uses Whisper's steadier DTW word times, minus their small lag (${dtw.words.map((w) => w.t0).join(", ")} s)`);
 
   console.log("\n--- FITTING CLIP LENGTHS (no tools) ---");
   const sent = Array.from({ length: 30 }, (_, i) => ({ t0: i * 4, t1: i * 4 + 3.5, text: `s${i}`, words: [{ w: `w${i}`, t0: i * 4, t1: i * 4 + 3.5 }] }));
@@ -125,6 +129,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(shrunk[0] === 2 && len(shrunk) >= 30 && len(shrunk) <= 60, `shrinks a long pick from the end (${len(shrunk).toFixed(1)} s)`);
   const edge = fitSpan(sent, 27, 29, [61, 70]);
   check(edge[1] === 29 && len(edge) >= 61, "near the end it grows backward instead");
+  const early = { long: { start: 0, end: 19.75, sentences: [0, 4] }, core: { start: 0, end: 11.75, sentences: [0, 2] },
+    speech: { words: sent.slice(0, 5).flatMap((s) => s.words), sentences: sent.slice(0, 5), music: false }, until: 20 };
+  const later = lengthen(early, { words: sent.slice(5, 20).flatMap((s) => s.words), sentences: sent.slice(5, 20), music: false }, { long: [61, 70] });
+  check(later.long.start === 0 && later.long.end - later.long.start >= 61 && later.core.end === 11.75 && later.speech.words.length === 20,
+    `more speech after the window lets TikTok's cut run over a minute from the same start (${(later.long.end - later.long.start).toFixed(1)} s)`);
 
   console.log("\n--- LAYOUT FROM FACES (no tools) ---");
   const frame = (faces) => ({ width: 1920, height: 1080, samples: Array.from({ length: 20 }, (_, i) => ({ t: i * 0.5, faces })) });
@@ -141,10 +150,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(keys.length === 2 && keys[0].cx < 960 && keys[1].cx > 960, `follows whoever talks: left, then right (${keys.map((k) => k.cx).join(" → ")})`);
   const expr = cropXExpr(keys, 608, 1920);
   check(/^if\(lt\(t,11\),/.test(expr) && expr.includes("(t-11)/0.4"), "the crop glides to the new speaker in 0.4 s");
-  const game = { width: 1920, height: 1080, samples: [] }; // a webcam top-left (seen 60% of the time) + a game character
+  const game = { width: 1920, height: 1080, samples: [] }; // a webcam top-left (seen 60% of the time) + game characters:
   for (let t = 0; t < 20; t += 0.5) {
     game.samples.push({ t, faces: [...(t % 5 < 3 ? [{ x: 120, y: 200, w: 110, h: 130, mouth: 0.1 }] : []),
-      { x: 700 + (t % 4) * 60, y: 300 + (t % 3) * 40, w: 260, h: 320, mouth: 0 }] });
+      { x: 700 + (t % 4) * 60, y: 300 + (t % 3) * 40, w: 260, h: 320, mouth: 0 }, // one wandering in the middle,
+      { x: 890, y: 60, w: 140, h: 170, mouth: 0 }] }); // one standing still near the top, always there
   }
   const gl = decide(game);
   check(gl.kind === "streamer" && gl.cam.x < 400, `finds the webcam, not the game character in the middle (${gl.why})`);
@@ -194,10 +204,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   console.log("\n--- THE BRAIN (a fake Ollama) ---");
   const asked = prompt(words.sentences, { long: [61, 70], core: [30, 60] });
+  check(/playing the game The Masterplan/.test(prompt(words.sentences, { long: [61, 70], core: [30, 60], game: "The Masterplan" })), "the brain is told which game is played");
   check(/politics/.test(asked) && /TRUE to what is said/.test(asked) && /no emojis/.test(asked), "the brain is told: true hooks only, skip banned topics, no emojis");
   check(/gambling/.test(prompt(words.sentences, { long: [61, 70], core: [30, 60], avoid: "gambling" })), "a campaign can set its own banned topics");
   check(plain("Child Labor? 🤔 #fyp") === "Child Labor?" && plain("🇵🇭 Wow 👍🏽") === "Wow", "emojis and hashtags are removed from on-screen text");
-  const brainAnswer = { score: 9, start: 0, end: 2, core_start: 0, core_end: 1, hook: "THIS KEYBOARD IS INSANE 🤯 #wow", caption: "test caption", why: "test" };
+  const brainAnswer = { score: 9, start: 0, core_end: 1, end: 2, hook: "THIS KEYBOARD IS INSANE 🤯 #wow", caption: "test caption", why: "test" };
   const fake = await fakeOllama(brainAnswer);
   process.env.OLLAMA_URL = `http://127.0.0.1:${fake.address().port}`;
   const cand = { peak: 15, score: 3, reasons: ["loud"], start: 0, end: 30, speech: words };
@@ -206,7 +217,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(c0?.by === "brain" && c0.hook === "THIS KEYBOARD IS INSANE" && c0.score === 9, "uses the brain's score and hook (without its emoji and hashtag)");
   check(c0 && c0.long.end - c0.long.start >= 20 && c0.core.end - c0.core.start >= 10 && c0.core.end - c0.core.start <= 18.5,
     `fits the lengths (long ${(c0.long.end - c0.long.start).toFixed(1)} s, core ${(c0.core.end - c0.core.start).toFixed(1)} s)`);
-  check(c0 && c0.core.start >= c0.long.start && c0.core.end <= c0.long.end, "the core cut sits inside the long cut");
+  check(c0 && c0.core.start === c0.long.start && c0.core.end <= c0.long.end, "every version opens on the same line; the long cut only runs on");
   process.env.OLLAMA_URL = "http://127.0.0.1:9";
   const offline = await pickClips([cand], { count: 1, long: [20, 28], core: [10, 18] });
   check(offline.clips[0]?.by === "loudness" && /not reachable/.test(offline.note) && offline.clips[0].hook, "with no brain it still picks a clip (and says so)");
