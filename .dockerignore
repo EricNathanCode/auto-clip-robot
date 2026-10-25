@@ -1,0 +1,8 @@
+test.js
+*.mp4
+*.wav
+*.json
+!package.json
+.work
+out*
+README.md

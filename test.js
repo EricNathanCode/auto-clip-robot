@@ -1,0 +1,261 @@
+// End-to-end test of the Auto Clip Robot with made-up media (no real streams, nothing personal).
+// Usage: node test.js <scratchDir>
+// Needs ffmpeg/ffprobe, whisper-cli + model, python3 with OpenCV + the YuNet model (see tools.js for the env names),
+// and a text-to-speech voice for the fake streamer: espeak-ng (Linux/container) or Windows' built-in voice.
+const fs = require("fs");
+const http = require("http");
+const path = require("path");
+const { spawn } = require("child_process");
+const { TOOLS, run, probe } = require("./tools");
+const { excitement, pickPeaks, loudness, STEP } = require("./moments");
+const { fromWhisper, transcribe } = require("./speech");
+const { fitSpan, pickClips } = require("./brain");
+const { decide, camBox, speakerTrack, cropXExpr, findFaces } = require("./layout");
+const { chunks, buildAss } = require("./captions");
+const { clipVideo } = require("./clip");
+
+const scratch = path.resolve(process.argv[2] || "autoclip-test");
+// The link test uses a local file:// link, which yt-dlp only accepts when asked.
+if (!/--enable-file-urls/.test(process.env.YTDLP_ARGS || "")) process.env.YTDLP_ARGS = `${process.env.YTDLP_ARGS || ""} --enable-file-urls`.trim();
+let failures = 0;
+const check = (ok, what) => { console.log(`${ok ? "✅" : "❌"} ${what}`); if (!ok) failures++; };
+const near = (a, b, tol) => Math.abs(a - b) <= tol;
+const ff = (...args) => run(TOOLS.ffmpeg(), ["-y", "-v", "error", ...args]);
+
+const LINES = "Okay chat, listen to this. I just bought the cheapest mechanical keyboard on the internet. " +
+  "No way! The keys actually feel smooth. It sounds like a thousand dollar keyboard. " +
+  "Let's do a typing test. One hundred and twenty words per minute! That is my new record. " +
+  "Anyway, thank you for watching, and remember to stay hydrated.";
+
+async function say(text, wav) {
+  if (process.platform === "win32") {
+    const ps = `Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; ` +
+      `$s.SetOutputToWaveFile('${wav.replace(/'/g, "''")}'); $s.Speak('${text.replace(/'/g, "''")}'); $s.Dispose()`;
+    return run("powershell", ["-NoProfile", "-Command", ps]);
+  }
+  return run("espeak-ng", ["-s", "165", "-w", wav, text]);
+}
+
+// A fake 3.7-minute stream: gameplay test pattern with a pink "webcam" box (top right), the voice talking at normal
+// volume the whole time, and two hype moments: +10 dB at 80 s, and at 160 s right after 3 s of near-silence.
+async function makeStream(dir) {
+  const voice = path.join(dir, "voice.wav"), out = path.join(dir, "stream.mp4");
+  await say(LINES, voice);
+  await ff("-stream_loop", "-1", "-i", voice, "-i", voice, "-i", voice, "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=220",
+    "-filter_complex",
+    "[0]aresample=16000,atrim=0:220,asetpts=PTS-STARTPTS,volume=-12dB,volume='if(between(t,157,160),0.02,1)':eval=frame[bed];" +
+    "[1]aresample=16000,atrim=3:11,asetpts=PTS-STARTPTS,volume=10dB,adelay=80000|80000[b1];" +
+    "[2]aresample=16000,atrim=6:14,asetpts=PTS-STARTPTS,volume=10dB,adelay=160000|160000[b2];" +
+    "[bed][b1][b2]amix=inputs=3:normalize=0,atrim=0:220[a];" +
+    "[3:v]drawbox=x=1000:y=40:w=250:h=170:color=0xF472B6:t=fill[v]",
+    "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", "-c:a", "aac", "-shortest", out);
+  return { voice, stream: out };
+}
+
+// A stand-in for Ollama that always answers the same clip plan (tests the plumbing, not the AI's taste).
+function fakeOllama(answer) {
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      if (req.url === "/api/tags") return res.end(JSON.stringify({ models: [{ name: TOOLS.brainModel() }] }));
+      res.end(JSON.stringify({ message: { content: JSON.stringify(answer) } }));
+    });
+  });
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
+}
+
+function api(port, method, p, body, raw) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port, path: p, method, headers: raw ? {} : { "Content-Type": "application/json" } }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        const buf = Buffer.concat(chunks);
+        let json = null;
+        try { json = JSON.parse(buf.toString()); } catch {}
+        resolve({ status: res.statusCode, json, buf });
+      });
+    });
+    req.on("error", reject);
+    if (raw) fs.createReadStream(raw).pipe(req);
+    else req.end(body === undefined ? undefined : JSON.stringify(body));
+  });
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+(async () => {
+  fs.rmSync(scratch, { recursive: true, force: true });
+  fs.mkdirSync(scratch, { recursive: true });
+
+  console.log("\n--- FINDING MOMENTS (no tools) ---");
+  const levels = Array.from({ length: 800 }, (_, i) => -30 + Math.sin(i) * 2); // 200 s of normal talk
+  for (let i = 300; i < 312; i++) levels[i] = -12; // loud at 75 s
+  for (let i = 588; i < 600; i++) levels[i] = -75; // quiet 147-150 s…
+  for (let i = 600; i < 612; i++) levels[i] = -12; // …then a burst at 150 s
+  const ex = excitement(levels);
+  const peaks = pickPeaks(ex.score, { count: 3, gap: 40, duration: 200, bonus: ex.bonus });
+  check(peaks.some((p) => near(p.peak, 75, 3)) && peaks.some((p) => near(p.peak, 150, 3)), `finds both loud moments (${peaks.map((p) => p.peak).join(", ")} s)`);
+  const burst = peaks.find((p) => near(p.peak, 150, 3)), plain = peaks.find((p) => near(p.peak, 75, 3));
+  check(burst?.reasons.includes("silence → explosion") && !plain?.reasons.includes("silence → explosion"), "spots \"silence → explosion\" only after real silence");
+  check(peaks.every((p) => p.start <= p.peak && p.end >= p.peak && p.start >= 0 && p.end <= 200), "windows contain their peak and stay inside the video");
+  const withClue = pickPeaks(ex.score, { count: 1, duration: 200, extras: [{ t: 30, weight: 20, why: "most replayed" }] });
+  check(near(withClue[0].peak, 30, 5) && withClue[0].reasons.includes("most replayed"), "outside clues (most replayed) lift a quiet moment");
+
+  console.log("\n--- READING WHISPER'S OUTPUT (no tools) ---");
+  const fakeWhisper = { transcription: [
+    { text: " Okay chat, listen.", tokens: [{ text: "[_BEG_]", offsets: { from: 0, to: 0 } }, { text: " Okay", offsets: { from: 0, to: 400 } },
+      { text: " chat", offsets: { from: 400, to: 700 } }, { text: ",", offsets: { from: 700, to: 720 } }, { text: " list", offsets: { from: 720, to: 900 } },
+      { text: "en", offsets: { from: 900, to: 1100 } }, { text: ".", offsets: { from: 1100, to: 1150 } }, { text: "[_TT_57]", offsets: { from: 1150, to: 1150 } }] },
+    { text: " [Music]", tokens: [{ text: " [Music]", offsets: { from: 2000, to: 4000 } }] }] };
+  const parsed = fromWhisper(fakeWhisper, 100);
+  check(parsed.words.map((w) => w.w).join("|") === "Okay|chat,|listen.", `joins word pieces + punctuation, skips special tokens (${parsed.words.map((w) => w.w).join(" ")})`);
+  check(parsed.words[0].t0 === 100 && parsed.words[2].t1 === 101.15, "word times are moved to the stream's clock");
+  check(parsed.music === true && parsed.sentences.length === 1, "notices [Music] and keeps it out of the captions");
+
+  console.log("\n--- FITTING CLIP LENGTHS (no tools) ---");
+  const sent = Array.from({ length: 30 }, (_, i) => ({ t0: i * 4, t1: i * 4 + 3.5, text: `s${i}`, words: [{ w: `w${i}`, t0: i * 4, t1: i * 4 + 3.5 }] }));
+  const len = ([a, b]) => sent[b].t1 + 0.25 - sent[a].t0;
+  const grown = fitSpan(sent, 5, 6, [61, 70]);
+  check(grown[0] === 5 && len(grown) >= 61 && len(grown) <= 70, `grows a short pick forward, keeping its hook (${len(grown).toFixed(1)} s)`);
+  const shrunk = fitSpan(sent, 2, 28, [30, 60]);
+  check(shrunk[0] === 2 && len(shrunk) >= 30 && len(shrunk) <= 60, `shrinks a long pick from the end (${len(shrunk).toFixed(1)} s)`);
+  const edge = fitSpan(sent, 27, 29, [61, 70]);
+  check(edge[1] === 29 && len(edge) >= 61, "near the end it grows backward instead");
+
+  console.log("\n--- LAYOUT FROM FACES (no tools) ---");
+  const frame = (faces) => ({ width: 1920, height: 1080, samples: Array.from({ length: 20 }, (_, i) => ({ t: i * 0.5, faces })) });
+  const small = decide(frame([{ x: 1600, y: 80, w: 120, h: 150, score: 0.9, mouth: 0.05 }]));
+  check(small.kind === "streamer", `a small face in a corner = streamer (${small.why})`);
+  check(small.cam && small.cam.x + small.cam.w <= 1920 && small.cam.y + small.cam.h <= 1080 && small.cam.w / small.cam.h >= 1.3 && small.cam.w / small.cam.h <= 1.8,
+    `the cam box grows around the face and stays in the frame (${JSON.stringify(small.cam)})`);
+  check(decide(frame([{ x: 700, y: 200, w: 400, h: 500, score: 0.9, mouth: 0.1 }])).kind === "podcast", "a big face = podcast");
+  check(decide(frame([])).kind === "gameplay", "no face = gameplay on a blurred background");
+  check(decide(frame([{ x: 700, y: 200, w: 400, h: 500, score: 0.9, mouth: 0.1 }]), "streamer").kind === "streamer", "a streamer tag wins over the guess");
+  const two = { width: 1920, height: 1080, samples: [] };
+  for (let t = 0; t < 20; t += 0.5) two.samples.push({ t, faces: [{ x: 300, y: 200, w: 300, h: 380, mouth: t < 10 ? 0.12 : 0.01 }, { x: 1300, y: 200, w: 300, h: 380, mouth: t < 10 ? 0.01 : 0.15 }] });
+  const keys = speakerTrack(two, [{ t0: 1, t1: 8 }, { t0: 11, t1: 18 }], 0);
+  check(keys.length === 2 && keys[0].cx < 960 && keys[1].cx > 960, `follows whoever talks: left, then right (${keys.map((k) => k.cx).join(" → ")})`);
+  const expr = cropXExpr(keys, 608, 1920);
+  check(/^if\(lt\(t,11\),/.test(expr) && expr.includes("(t-11)/0.4"), "the crop glides to the new speaker in 0.4 s");
+
+  console.log("\n--- CAPTIONS (no tools) ---");
+  const ws = "this is a test of the caption robot today. okay".split(" ").map((w, i) => ({ w, t0: 10 + i * 0.3, t1: 10.25 + i * 0.3 }));
+  const groups = chunks(ws);
+  check(groups.every((g) => g.length <= 3 && g.map((x) => x.w).join(" ").length <= 16), `chunks of max 3 words / 16 letters (${groups.map((g) => g.map((x) => x.w).join(" ")).join(" | ")})`);
+  check(groups.some((g) => g[g.length - 1].w === "today.") , "a new caption starts after a full stop");
+  const ass = buildAss({ words: [...ws, { w: "{\\bad}", t0: 12.8, t1: 13 }], clipStart: 10, clipEnd: 14, hook: "Hook Here", credit: "@someone" });
+  check(ass.includes("Hook Here") && ass.includes("@someone") && ass.includes("Style: Cap,Fredoka"), "the subtitle file has the hook, the credit and the Fredoka style");
+  check(!ass.includes("{\\bad}") && /Dialogue: 1,0:00:00.00,/.test(ass), "caption times start at the clip's start, and braces in words can't inject styles");
+
+  console.log("\n--- TOOLS: LOUDNESS, SPEECH, FACES ---");
+  const { voice, stream } = await makeStream(scratch);
+  const info = await probe(stream);
+  check(near(info.duration, 220, 1) && info.hasAudio && info.width === 1280, `made a ${Math.round(info.duration)} s fake stream`);
+  const lv = await loudness(stream);
+  check(near(lv.length * STEP, 220, 2), `reads loudness every ${STEP} s (${lv.length} readings)`);
+  const words = await transcribe(voice, 0, 30, path.join(scratch, "speech"));
+  const said = words.words.map((w) => w.w.toLowerCase()).join(" ");
+  check(/keyboard/.test(said) && /chat/.test(said), `the speech AI writes down the voice ("${said.slice(0, 60)}…")`);
+  check(words.words.every((w, i, a) => w.t1 >= w.t0 && (i === 0 || w.t0 >= a[i - 1].t0)), "word times go forward");
+  const faces = await findFaces(stream, 10, 14, 1);
+  check(faces.width === 1280 && faces.samples.length >= 3 && faces.samples.every((s) => s.faces.length === 0), "the face finder runs (and sees no face in a test pattern)");
+
+  console.log("\n--- THE BRAIN (a fake Ollama) ---");
+  const brainAnswer = { score: 9, start: 0, end: 2, core_start: 0, core_end: 1, hook: "THIS KEYBOARD IS INSANE", caption: "test caption", why: "test" };
+  const fake = await fakeOllama(brainAnswer);
+  process.env.OLLAMA_URL = `http://127.0.0.1:${fake.address().port}`;
+  const cand = { peak: 15, score: 3, reasons: ["loud"], start: 0, end: 30, speech: words };
+  const picked = await pickClips([cand], { count: 1, long: [20, 28], core: [10, 18] });
+  const c0 = picked.clips[0];
+  check(c0?.by === "brain" && c0.hook === "THIS KEYBOARD IS INSANE" && c0.score === 9, "uses the brain's score and hook");
+  check(c0 && c0.long.end - c0.long.start >= 20 && c0.core.end - c0.core.start >= 10 && c0.core.end - c0.core.start <= 18.5,
+    `fits the lengths (long ${(c0.long.end - c0.long.start).toFixed(1)} s, core ${(c0.core.end - c0.core.start).toFixed(1)} s)`);
+  check(c0 && c0.core.start >= c0.long.start && c0.core.end <= c0.long.end, "the core cut sits inside the long cut");
+  process.env.OLLAMA_URL = "http://127.0.0.1:9";
+  const offline = await pickClips([cand], { count: 1, long: [20, 28], core: [10, 18] });
+  check(offline.clips[0]?.by === "loudness" && /not reachable/.test(offline.note) && offline.clips[0].hook, "with no brain it still picks a clip (and says so)");
+
+  console.log("\n--- PODCAST LAYOUT (fake faces) ---");
+  const fakeFaces = { width: 1280, height: 720, samples: [] };
+  for (let t = 0; t <= 220; t += 0.5) {
+    fakeFaces.samples.push({ t, faces: [{ x: 200, y: 150, w: 220, h: 280, mouth: Math.floor(t / 6) % 2 ? 0.01 : 0.12 },
+      { x: 860, y: 150, w: 220, h: 280, mouth: Math.floor(t / 6) % 2 ? 0.13 : 0.01 }] });
+  }
+  fs.writeFileSync(path.join(scratch, "faces.json"), JSON.stringify(fakeFaces));
+  process.env.FAKE_FACES = path.join(scratch, "faces.json");
+  const pod = await clipVideo({ source: stream, outDir: path.join(scratch, "podcast"), platforms: ["reels"], count: 1,
+    long: [20, 28], core: [10, 18], credit: "@pod", log: () => {} });
+  delete process.env.FAKE_FACES;
+  const podInfo = await probe(path.join(scratch, "podcast", pod.outputs[0].file));
+  check(pod.layout.kind === "podcast" && podInfo.width === 1080 && podInfo.height === 1920, "big faces → a 1080x1920 podcast clip that follows the speaker");
+
+  console.log("\n--- THE JOB API (a server, like on the Dell) ---");
+  process.env.OLLAMA_URL = `http://127.0.0.1:${fake.address().port}`;
+  const work = path.join(scratch, "work");
+  fs.mkdirSync(path.join(work, "old-job"), { recursive: true });
+  fs.writeFileSync(path.join(work, "old-job", "status.json"), JSON.stringify({ job: "old-job", status: "working" }));
+  const port = 18000 + Math.floor(Math.random() * 1000);
+  const server = spawn(process.execPath, [path.join(__dirname, "server.js")], {
+    env: { ...process.env, PORT: String(port), WORK_DIR: work, ALLOW_FILE_URLS: "1", YTDLP_SELF_UPDATE: "" }, stdio: ["ignore", "pipe", "pipe"] });
+  server.stdout.on("data", () => {});
+  server.stderr.on("data", () => {});
+  for (let i = 0; i < 50; i++) { try { await api(port, "GET", "/health"); break; } catch { await sleep(200); } }
+  const health = await api(port, "GET", "/health");
+  check(health.json?.ok && /ffmpeg/i.test(health.json.ffmpeg) && health.json.busy === false, "health: ffmpeg found, not busy");
+  const old = await api(port, "GET", "/jobs/old-job/status");
+  check(old.json?.status === "failed" && /restarted/.test(old.json.error), "a job cut off by a restart is marked failed");
+
+  check((await api(port, "POST", "/jobs/empty")).status === 201, "reserving a job answers 201");
+  const empty = await api(port, "POST", "/jobs/empty/start", {});
+  check(empty.status === 400 && (await api(port, "GET", "/jobs/empty/status")).json.status === "failed", "starting with no video is refused and the job says why");
+  await api(port, "POST", "/jobs/bad");
+  const bads = [{ url: "ftp://x" }, { url: "https://x", platforms: ["myspace"] }, { url: "https://x", long: [90, 20] },
+    { url: "https://x", layout: "sideways" }, { url: "https://x", count: 9 }];
+  const codes = [];
+  for (const b of bads) { await api(port, "POST", "/jobs/bad"); codes.push((await api(port, "POST", "/jobs/bad/start", b)).status); }
+  check(codes.every((c) => c === 400), `bad url / platform / lengths / layout / count are refused (${codes.join(",")})`);
+  check((await api(port, "PUT", "/jobs/..%2F..%2Fescape/files/x.mp4", undefined, voice)).status !== 500 && !fs.existsSync(path.join(scratch, "escape")),
+    "sneaky ../ names stay inside the work folder");
+
+  await api(port, "POST", "/jobs/clip1");
+  const up = await api(port, "PUT", "/jobs/clip1/files/stream.mp4", undefined, stream);
+  check(up.json?.bytes === fs.statSync(stream).size, "uploading the source video");
+  const start = await api(port, "POST", "/jobs/clip1/start", { cam: { x: 1000, y: 40, w: 250, h: 170 }, credit: "@tester",
+    platforms: ["tiktok", "shorts"], long: [20, 28], core: [10, 18], count: 1 });
+  check(start.status === 202, "starting answers 202 at once (background job)");
+  check((await api(port, "POST", "/jobs/clip1/start", {})).status === 409, "a second start while working is refused (409)");
+  check((await api(port, "GET", "/jobs/clip1/clips/01-tiktok.mp4")).status === 404, "no clip until it is done (404)");
+  let st;
+  const t0 = Date.now();
+  do { await sleep(2000); st = (await api(port, "GET", "/jobs/clip1/status")).json; } while (["queued", "working"].includes(st.status) && Date.now() - t0 < 20 * 60 * 1000);
+  check(st.status === "done", `finishes as "done" (${st.seconds} s)${st.error ? `: ${st.error}` : ""}`);
+  const outs = st.result?.outputs || [];
+  check(outs.length === 2 && outs.map((o) => o.platform).join() === "tiktok,shorts", "one clip × 2 platforms = 2 files");
+  check(st.result?.clips[0]?.hook === "THIS KEYBOARD IS INSANE" && /@tester/.test(st.result.clips[0].caption), "the result has the hook and a ready caption with the credit");
+  if (outs.length === 2) {
+    const tk = await api(port, "GET", `/jobs/clip1/clips/${outs[0].file}`);
+    fs.writeFileSync(path.join(scratch, "tiktok.mp4"), tk.buf);
+    const ti = await probe(path.join(scratch, "tiktok.mp4"));
+    check(tk.status === 200 && ti.width === 1080 && ti.height === 1920 && ti.hasAudio, "the TikTok clip downloads: 1080x1920 with sound");
+    check(ti.duration >= 19 && ti.duration <= 29.5 && outs[1].seconds >= 9.5 && outs[1].seconds <= 19, `lengths follow the rules (TikTok ${ti.duration.toFixed(1)} s, Shorts ${outs[1].seconds} s)`);
+  }
+  check(!fs.existsSync(path.join(work, "clip1", "in")), "the big source file is deleted after clipping");
+  check((await api(port, "DELETE", "/jobs/clip1")).status === 200 && (await api(port, "GET", "/jobs/clip1/status")).status === 404, "deleting a job removes it");
+
+  if ((await api(port, "GET", "/health")).json.ytdlp !== "missing") {
+    await api(port, "POST", "/jobs/url1");
+    const u = await api(port, "POST", "/jobs/url1/start", { url: "file:///" + stream.replace(/\\/g, "/").replace(/^\//, ""), cam: { x: 1000, y: 40, w: 250, h: 170 },
+      platforms: ["shorts"], long: [20, 28], core: [10, 18], count: 1 });
+    let us;
+    const t1 = Date.now();
+    do { await sleep(2000); us = (await api(port, "GET", "/jobs/url1/status")).json; } while (u.status === 202 && ["queued", "working"].includes(us.status) && Date.now() - t1 < 20 * 60 * 1000);
+    check(us.status === "done" && us.result.outputs.length === 1, `a link works too: audio first, then the video (${us.status}${us.error ? `: ${us.error}` : ""})`);
+  }
+
+  server.kill();
+  fake.close();
+  console.log(failures ? `\n${failures} check(s) FAILED` : "\nAll checks passed");
+  process.exit(failures ? 1 : 0);
+})().catch((e) => { console.error(e); process.exit(1); });
