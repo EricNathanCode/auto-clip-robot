@@ -1,15 +1,21 @@
-// Getting a stream from YouTube / Twitch with yt-dlp, without downloading hours of video:
+// Getting a stream from YouTube / Twitch with yt-dlp:
 //   1. info: title, channel, length, and YouTube's "most replayed" graph when there is one (a bonus clue)
 //   2. the AUDIO only (~60 MB per hour): enough to find the moments and write down the speech
-//   3. only the few minutes around each chosen clip, in good quality (max 1080p)
+//   3. the picture: only the few minutes around each clip where that works (Twitch), or the whole video once
+//      (YouTube: cutting it online through FFmpeg came back without picture and crawled at a few KB/s, while
+//      yt-dlp's own downloader is fast and reliable). The clips are then cut locally, exactly.
+// Video is always H.264 (avc1, max 1080p) with the ORIGINAL audio track (some videos also carry dubbed languages):
+// every tool here reads H.264, while AV1 trips up exact cutting and the face finder.
 // Campaign footage from Google Drive doesn't come through here: n8n uploads that file straight to the job.
 const fs = require("fs");
 const path = require("path");
-const { TOOLS, run, round } = require("./tools");
+const { TOOLS, run, probe, round } = require("./tools");
 
-// Extra flags from the environment: YTDLP_ARGS (e.g. "--js-runtimes node" in the container, or
+// Extra flags from the environment: YTDLP_ARGS (e.g. "--js-runtimes node --force-ipv4" in the container, or
 // "--enable-file-urls" in tests).
 const extra = () => (process.env.YTDLP_ARGS || "").split(/\s+/).filter(Boolean);
+const VIDEO = "bv*[vcodec^=avc1][height<=1080]+ba[ext=m4a]/bv*[vcodec^=avc1][height<=1080]+ba/bv*[height<=1080]+ba/b[height<=1080]/b";
+const isYouTube = (url) => /^https?:\/\/([a-z0-9-]+\.)*(youtube\.com|youtu\.be)\//i.test(url);
 
 async function info(url) {
   const j = JSON.parse(await run(TOOLS.ytdlp(), [...extra(), "--no-playlist", "--no-warnings", "-J", url]));
@@ -36,26 +42,34 @@ async function audioOnly(url, dir) {
   return path.join(dir, file);
 }
 
+// A download that came back as sound only is useless for a vertical clip: say so (and delete it).
+async function withPicture(file, what) {
+  const p = await probe(file).catch(() => ({ hasVideo: false }));
+  if (!p.hasVideo) {
+    fs.rmSync(file, { force: true });
+    throw new Error(`${what} came back without picture (sound only)`);
+  }
+  return file;
+}
+
 // Downloads [start, end] of the video (+ sound). Cut points get keyframes, so the file starts exactly at `start`.
 async function section(url, start, end, dir, name) {
   fs.mkdirSync(dir, { recursive: true });
   const out = path.join(dir, `${name}.mp4`);
-  await run(TOOLS.ytdlp(), [...extra(), "--no-playlist", "--no-warnings",
-    "-f", "bv*[height<=1080]+ba/b[height<=1080]/b", "--merge-output-format", "mp4",
+  await run(TOOLS.ytdlp(), [...extra(), "--no-playlist", "--no-warnings", "-f", VIDEO, "--merge-output-format", "mp4",
     "--download-sections", `*${round(start)}-${round(end)}`, "--force-keyframes-at-cuts", "-o", out, url]);
   if (!fs.existsSync(out)) throw new Error(`the download of ${round(start)}-${round(end)} s produced no file`);
-  return out;
+  return withPicture(out, `the ${round(start)}-${round(end)} s part`);
 }
 
-// The whole video (max 1080p), for sources that can't be downloaded in parts (plain file links).
+// The whole video (max 1080p, H.264), downloaded once per job and reused for every clip.
 async function full(url, dir) {
   fs.mkdirSync(dir, { recursive: true });
   const out = path.join(dir, "full.mp4");
   if (!fs.existsSync(out)) {
-    await run(TOOLS.ytdlp(), [...extra(), "--no-playlist", "--no-warnings", "-f", "bv*[height<=1080]+ba/b[height<=1080]/b",
-      "--merge-output-format", "mp4", "-o", out, url]);
+    await run(TOOLS.ytdlp(), [...extra(), "--no-playlist", "--no-warnings", "-f", VIDEO, "--merge-output-format", "mp4", "-o", out, url]);
   }
-  return out;
+  return withPicture(out, "the video");
 }
 
-module.exports = { info, heatClues, audioOnly, section, full };
+module.exports = { info, heatClues, audioOnly, section, full, isYouTube, VIDEO };

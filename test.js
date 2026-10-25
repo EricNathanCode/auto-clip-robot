@@ -13,6 +13,7 @@ const { fitSpan, pickClips, prompt, plain } = require("./brain");
 const { decide, camBox, speakerTrack, cropXExpr, findFaces } = require("./layout");
 const { chunks, buildAss } = require("./captions");
 const { clipVideo } = require("./clip");
+const download = require("./download");
 
 const scratch = path.resolve(process.argv[2] || "autoclip-test");
 // The link test uses a local file:// link, which yt-dlp only accepts when asked.
@@ -159,6 +160,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const said = words.words.map((w) => w.w.toLowerCase()).join(" ");
   check(/keyboard/.test(said) && /chat/.test(said), `the speech AI writes down the voice ("${said.slice(0, 60)}…")`);
   check(words.words.every((w, i, a) => w.t1 >= w.t0 && (i === 0 || w.t0 >= a[i - 1].t0)), "word times go forward");
+  const fileUrl = (f) => "file:///" + f.replace(/\\/g, "/").replace(/^\//, "");
+  const soundOnly = await download.full(fileUrl(voice), path.join(scratch, "dl-sound")).then(() => "accepted", (e) => e.message);
+  check(/without picture/.test(soundOnly) && !fs.existsSync(path.join(scratch, "dl-sound", "full.mp4")), `a download with sound but no picture is refused and deleted ("${soundOnly}")`);
+  check(download.isYouTube("https://www.youtube.com/watch?v=x") && download.isYouTube("https://youtu.be/x") && !download.isYouTube("https://www.twitch.tv/videos/1")
+    && /vcodec\^=avc1/.test(download.VIDEO), "YouTube gets one whole H.264 download; other sites try just the minutes first");
   const faces = await findFaces(stream, 10, 14, 1);
   check(faces.width === 1280 && faces.samples.length >= 3 && faces.samples.every((s) => s.faces.length === 0), "the face finder runs (and sees no face in a test pattern)");
 

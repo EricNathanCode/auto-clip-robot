@@ -57,6 +57,10 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
     log("step: downloading the audio only");
     analysis = await download.audioOnly(source, path.join(workDir, "audio"));
     getVideo = async (c, i) => {
+      if (download.isYouTube(source)) { // cutting YouTube online is unreliable: one whole download, cut locally
+        log(i === 0 ? "step: downloading the video once (H.264, max 1080p)" : `step: reusing the downloaded video for clip ${i + 1}`);
+        return { file: await download.full(source, path.join(workDir, "video")), offset: 0 };
+      }
       const from = Math.max(0, c.long.start - 2);
       log(`step: downloading ${round(c.long.end + 2 - from)} s of video for clip ${i + 1}`);
       try {
