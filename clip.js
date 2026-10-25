@@ -10,7 +10,7 @@ const { probe, round, clamp } = require("./tools");
 const { findMoments } = require("./moments");
 const { transcribe } = require("./speech");
 const { pickClips, lengthen, LENGTHS } = require("./brain");
-const { findFaces, decide, speakerTrack } = require("./layout");
+const { findFaces, decide, speakerTrack, webcamBorder } = require("./layout");
 const { renderVersion } = require("./render");
 const download = require("./download");
 
@@ -113,9 +113,14 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
     if (!layout) { // decided once, on the first clip
       // With the whole video on disk, judge from 90 looks spread across all of it: a webcam stays in its spot the
       // whole stream, while game characters come and go (one standing still during a clip once fooled it).
-      const whole = !cam && tag !== "podcast" && video.offset === 0 && src.duration > 3 * (c.long.end - c.long.start)
+      const wholeVideo = video.offset === 0 && src.duration > 3 * (c.long.end - c.long.start);
+      const whole = !cam && tag !== "podcast" && wholeVideo
         ? await facesFor(video.file, 0, src.duration, src.duration / 90, { cuts: false }) : faces;
       layout = cam ? { kind: "streamer", cam, why: "cam box given" } : decide(whole, tag === "auto" ? null : tag);
+      if (layout.face && wholeVideo && !process.env.FAKE_FACES) { // fit the cam to the webcam box's real border
+        const border = await webcamBorder(video.file, 0, src.duration, layout.face);
+        if (border) layout = { ...layout, cam: border, why: `${layout.why}, webcam border found` };
+      }
       log(`layout: ${layout.kind} (${layout.why})`);
     }
     for (const p of platforms) {

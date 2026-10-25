@@ -34,7 +34,7 @@ RUN curl -fsSL --retry 3 -o /app/bin/yt-dlp "https://github.com/yt-dlp/yt-dlp/re
 
 WORKDIR /app
 COPY fonts ./fonts
-COPY tools.js moments.js speech.js brain.js layout.js faces.py captions.js render.js download.js clip.js server.js ./
+COPY tools.js moments.js speech.js brain.js layout.js faces.py webcam.py captions.js render.js download.js clip.js server.js ./
 
 ENV WORK_DIR=/work PORT=8091 OLLAMA_URL=http://ollama:11434 BRAIN_MODEL=qwen2.5:7b THREADS=4 \
     WHISPER=/usr/local/bin/whisper-cli WHISPER_MODEL=/models/ggml-small.en.bin \

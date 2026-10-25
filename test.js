@@ -10,7 +10,7 @@ const { TOOLS, run, probe } = require("./tools");
 const { excitement, pickPeaks, loudness, STEP } = require("./moments");
 const { fromWhisper, transcribe } = require("./speech");
 const { fitSpan, pickClips, lengthen, prompt, plain } = require("./brain");
-const { decide, camBox, speakerTrack, cropXExpr, findFaces, shotCuts } = require("./layout");
+const { decide, camBox, speakerTrack, cropXExpr, findFaces, shotCuts, webcamBorder, videoGraph } = require("./layout");
 const { chunks, buildAss, LOOKS } = require("./captions");
 const { clipVideo } = require("./clip");
 const download = require("./download");
@@ -164,6 +164,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const cutKeys = speakerTrack(cut, [{ t0: 0, t1: 10 }], 0);
   check(cutKeys.length === 2 && cutKeys[1].jump && cutKeys[1].t === 5.02 && cutKeys[1].cx === 1450,
     `at a camera cut the crop jumps to the face in the new shot (${cutKeys.map((k) => `${k.t}s→${k.cx}`).join(", ")})`);
+  const wide = videoGraph({ kind: "streamer", cam: { x: 0, y: 0, w: 800, h: 200 } }, { width: 1920, height: 1080 });
+  check(wide.graph.includes("crop=400:200:200:0,scale=1080:540"), "a very wide webcam is trimmed to fit the top, never stretched");
   const cutExpr = cropXExpr(cutKeys, 608, 1920);
   check(cutExpr.startsWith("if(lt(t,5.02),") && !cutExpr.includes("/0.4"), "a jump has no glide");
 
@@ -178,6 +180,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const dash = buildAss({ words: [{ w: "in,", t0: 1, t1: 1.3 }, { w: "-", t0: 1.3, t1: 1.4 }], clipStart: 0, clipEnd: 3, look: "mint" });
   check(!/ -|-\{|\}-/.test(dash.split("[Events]")[1]) && Object.keys(LOOKS).every((k) => !/^Style: Cap(,[^,]*){14},3,/m.test(buildAss({ words: [], clipStart: 0, clipEnd: 1, look: k }))),
     "a lone dash is never shown, and no caption look darkens the picture with a box");
+  check(/^Style: Credit(,[^,]*){17},7,/m.test(ass), "the creator's name sits top-left");
 
   console.log("\n--- TOOLS: LOUDNESS, SPEECH, FACES ---");
   const { voice, stream } = await makeStream(scratch);
@@ -201,6 +204,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     "-filter_complex", "[0][1]concat=n=2:v=1:a=0", "-c:v", "libx264", "-preset", "ultrafast", twoShots);
   const shots = await shotCuts(twoShots, 1, 6);
   check(shots.length === 1 && near(shots[0], 2, 0.05), `finds the camera cut, timed from the clip's start (${shots.join(", ")} s)`);
+  const overlay = path.join(scratch, "webcam-overlay.mp4"); // ever-changing "gameplay" with a still webcam box top-left
+  await ff("-f", "lavfi", "-i", "gradients=s=640x360:speed=0.08:n=4:rate=25", "-t", "12",
+    "-vf", "drawbox=x=0:y=40:w=200:h=120:color=0x403530:t=fill", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", overlay);
+  const border = await webcamBorder(overlay, 0, 12, { x: 70, y: 70, w: 40, h: 50 });
+  check(border && near(border.x, 0, 6) && near(border.y, 40, 6) && near(border.w, 200, 8) && near(border.h, 120, 8),
+    `finds the webcam box's exact border (${JSON.stringify(border)})`);
 
   console.log("\n--- THE BRAIN (a fake Ollama) ---");
   const asked = prompt(words.sentences, { long: [61, 70], core: [30, 60] });

@@ -1,6 +1,7 @@
 // Burned-in text as an ASS subtitle file (rendered by FFmpeg's libass with the Fredoka font):
 //   word-by-word captions (2-3 words at a time, the spoken word highlighted and a bit bigger),
-//   a hook title in a white box for the first seconds, and a small credit line ("@streamer") the whole clip.
+//   a hook title in a white box for the first seconds, and the creator's name ("@streamer") top-left the whole clip,
+//   just under the platforms' top bar.
 // Three caption looks, so the TikTok / Shorts / Reels / X versions don't look like copies of each other.
 const { round } = require("./tools");
 
@@ -51,7 +52,7 @@ ScaledBorderAndShadow: yes
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Cap,Fredoka,${look.size},${look.colour},${look.colour},${BLACK},&H64000000,-1,0,0,0,100,100,0,0,1,${look.outline},2,5,60,60,0,1
 Style: Hook,Fredoka,72,${BLACK},${BLACK},${WHITE},${WHITE},-1,0,0,0,100,100,0,0,3,18,0,8,90,90,${hookY},1
-Style: Credit,Fredoka SemiBold,36,&H33FFFFFF,&H33FFFFFF,${BLACK},${BLACK},0,0,0,0,100,100,0,0,1,3,0,1,60,60,430,1
+Style: Credit,Fredoka SemiBold,40,&H22FFFFFF,&H22FFFFFF,${BLACK},${BLACK},0,0,0,0,100,100,0,0,1,4,0,7,60,60,200,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
