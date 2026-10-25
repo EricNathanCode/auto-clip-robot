@@ -13,7 +13,8 @@ link (YouTube / Twitch) or uploaded footage
   → 🔊 moments.js   loud spikes, "silence → explosion", optional YouTube "most replayed" peaks   (audio only, cheap)
   → 🗣️ speech.js    whisper.cpp (small.en) writes down ONLY the ~10 candidate windows, with word timings
   → 🧠 brain.js     the local AI scores each moment, picks the long cut + a shorter core cut (by sentence number,
-                     never by timestamp), writes a hook title and a caption; falls back to loudness if the AI is off
+                     never by timestamp), writes a hook title and a caption; falls back to loudness if the AI is off.
+                     Hooks must be true (no exaggeration about real people), banned topics score 1, emojis are removed
   → ⬇️ download.js  only the chosen minutes are downloaded in good quality (never the 3-hour video)
   → 🙂 layout.js    OpenCV YuNet finds faces: 🎮 streamer (cam on top, gameplay below) · 🎙️ podcast (crop follows
                      whoever's mouth moves, gliding between sentences) · 🕹️ gameplay (blurred background)
@@ -36,7 +37,7 @@ A campaign's own length rule replaces the defaults. Different cuts and looks mea
 | `GET /health` | ffmpeg / yt-dlp / whisper model check, `busy` (so n8n can take turns with the Auto Edit Robot) |
 | `POST /jobs/<job>` | reserve a job |
 | `PUT /jobs/<job>/files/<name>` | upload footage (e.g. a campaign's Drive file) |
-| `POST /jobs/<job>/start` | JSON `{ url?, layout, cam?, credit, who, title, platforms, long, core, count }` → 202, runs in the background |
+| `POST /jobs/<job>/start` | JSON `{ url?, layout, cam?, credit, who, title, platforms, long, core, count, mustInclude?, avoid? }` → 202, runs in the background (`mustInclude` = text a campaign requires in every caption, e.g. `#ad`; `avoid` = topics it bans) |
 | `GET /jobs/<job>/status` | queued / working (+ step) / done (+ clips, hooks, captions, files) / failed (+ reason) |
 | `GET /jobs/<job>/clips/<file>` | download one MP4 |
 | `DELETE /jobs/<job>` | clean up |
@@ -51,7 +52,7 @@ time, and the big source file is deleted as soon as the clips are made.
 - yt-dlp updates itself daily (YouTube changes often).
 
 ## Tests
-`node test.js <scratchDir>`: **49 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
+`node test.js <scratchDir>`: **53 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
 voice and two hype moments), a fake Ollama, fake faces for the podcast layout, the whole job API, and a file:// link
 through yt-dlp. On the Dell: `docker run --rm -v /opt/autoclip/test.js:/app/test.js autoclip node test.js /tmp/autoclip-test`
 

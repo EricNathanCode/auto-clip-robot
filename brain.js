@@ -20,21 +20,29 @@ const SCHEMA = {
   required: ["score", "start", "end", "core_start", "core_end", "hook", "caption", "why"],
 };
 
-function prompt(sentences, { who, title, kind, long, core }) {
+// Topics brands won't pay for (and campaigns ban). A campaign can replace the list.
+const AVOID = "politics, religion, drugs, violence, sex or adult topics, hate";
+
+function prompt(sentences, { who, title, kind, long, core, avoid = AVOID }) {
   const lines = sentences.map((s, i) => `[${i}] (${round(s.t1 - s.t0, 1)}s) ${s.text}`).join("\n");
   return `You cut viral short clips (TikTok, YouTube Shorts, Reels) from a ${kind || "livestream"}${who ? ` by ${who}` : ""}${title ? ` titled "${title}"` : ""}.
 Here is what was said around one possible moment, as numbered sentences with their length:
 ${lines}
 
 Decide:
-- score: 1-10, how likely this moment is to go viral on its own (funny, shocking, emotional, hype, a great story or hot take = high; boring, filler, needs outside context = low).
+- score: 1-10, how likely this moment is to go viral on its own (funny, surprising, emotional, hype, a great story or hot take = high; boring, filler, needs outside context = low). If the moment is mainly about ${avoid}, the score is 1.
 - start/end: the sentence numbers of the LONG clip (about ${long[0]}-${long[1]} seconds in total). Start on the line that makes people stop scrolling, not on filler. End on a complete thought or the reaction, never mid-story.
 - core_start/core_end: a SHORTER clip inside it (about ${core[0]}-${core[1]} seconds) with the same hook and the best part.
-- hook: a title shown on screen for the first seconds, max 6 words, curiosity, no hashtags, no emojis.
-- caption: a post caption, max 120 characters, no hashtags.
+- hook: a title shown on screen for the first seconds, max 6 words. It must be TRUE to what is said: no exaggeration, no shocking labels or claims about real people, no clickbait that misleads. Make people curious with what really happens. No hashtags, no emojis.
+- caption: a post caption, max 120 characters, true to the clip, no hashtags, no emojis.
 - why: max 15 words.
 Answer only with JSON.`;
 }
+
+// Emojis can't be drawn by the caption renderer and hashtags belong in the post text, not on screen.
+const plain = (s) => String(s || "")
+  .replace(/[\p{Extended_Pictographic}\p{Emoji_Modifier}\u{1F1E6}-\u{1F1FF}\u{E0020}-\u{E007F}️‍⃣]/gu, "")
+  .replace(/#\S+/g, "").replace(/\s+/g, " ").trim();
 
 async function askBrain(text) {
   const r = await postJson(`${TOOLS.ollama()}/api/chat`, {
@@ -93,7 +101,7 @@ async function planMoment(cand, ctx) {
       const last = sentences.length - 1;
       a = clamp(ans.start | 0, 0, last); b = clamp(ans.end | 0, a, last);
       ca = clamp(ans.core_start | 0, a, b); cb = clamp(ans.core_end | 0, ca, b);
-      hook = String(ans.hook || "").trim(); caption = String(ans.caption || "").trim(); why = String(ans.why || "").trim();
+      hook = plain(ans.hook); caption = plain(ans.caption); why = String(ans.why || "").trim();
       score = clamp(ans.score | 0, 1, 10);
       by = "brain";
     } catch (e) {
@@ -132,4 +140,4 @@ async function pickClips(candidates, ctx = {}) {
   return { clips: chosen.sort((x, y) => x.long.start - y.long.start), note: ctx.brainProblem || "" };
 }
 
-module.exports = { pickClips, planMoment, fitSpan, brainProblem, prompt, LENGTHS, SCHEMA };
+module.exports = { pickClips, planMoment, fitSpan, brainProblem, prompt, plain, LENGTHS, SCHEMA, AVOID };

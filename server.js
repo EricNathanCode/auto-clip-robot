@@ -2,7 +2,8 @@
 //   GET    /health                    → { ok, ffmpeg, ytdlp, whisper, jobsWaiting, busy }
 //   POST   /jobs/<job>                → reserves a fresh job ("receiving") before its source is sent
 //   PUT    /jobs/<job>/files/<name>   → raw body: a source video (campaign footage from Drive), saved to <job>/in/<name>
-//   POST   /jobs/<job>/start          → JSON body { url?, layout, cam?, credit, who, title, platforms, long, core, count }:
+//   POST   /jobs/<job>/start          → JSON body { url?, layout, cam?, credit, who, title, platforms, long, core, count,
+//                                       mustInclude?, avoid? }:
 //                                       starts clipping in the background (an uploaded file, or the url) and answers 202
 //   GET    /jobs/<job>/status         → { status: receiving | queued | working | done | failed, step, seconds, result | error }
 //   GET    /jobs/<job>/clips/<file>   → one finished MP4 (names are listed in result.outputs)
@@ -96,6 +97,10 @@ function checkOptions(body, jobDir) {
   }
   o.count = body.count === undefined ? 3 : Number(body.count);
   if (!(o.count >= 1 && o.count <= 5)) return { error: "count must be 1-5" };
+  o.candidates = body.candidates === undefined ? 10 : Number(body.candidates); // moments the AI rates (fewer = faster)
+  if (!(o.candidates >= o.count && o.candidates <= 15)) return { error: "candidates must be between count and 15" };
+  o.mustInclude = String(body.mustInclude || "").slice(0, 500); // campaign's required post text (#ad, show name…)
+  if (body.avoid) o.avoid = String(body.avoid).slice(0, 300); // campaign's banned topics
   o.credit = String(body.credit || "").slice(0, 40);
   o.who = String(body.who || "").slice(0, 80);
   o.title = String(body.title || "").slice(0, 200);

@@ -3,6 +3,7 @@
 //   → (download.js: only the chosen minutes) → layout.js (faces) → render.js (MP4s)
 // CLI: node clip.js <video file or URL> <outDir> [--layout auto|streamer|podcast] [--cam x,y,w,h] [--credit @name]
 //      [--who Name] [--title "…"] [--platforms tiktok,shorts,reels,x] [--long 61-70] [--core 30-60] [--count 3]
+//      [--must "#ad · text the campaign requires"] [--avoid "topics the campaign bans"] [--candidates 10]
 const fs = require("fs");
 const path = require("path");
 const { probe, round, clamp } = require("./tools");
@@ -34,8 +35,11 @@ async function facesFor(file, start, end) {
   return findFaces(file, start, end, 0.5);
 }
 
+// mustInclude: text a campaign requires in every post description (e.g. "#ad" + a line about the show).
+// avoid: topics this campaign bans (replaces the default list in brain.js).
 async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, credit = "", who = "", title = "",
-  platforms = ["tiktok", "shorts", "reels"], long, core, count = 3, candidates = 10, log = console.log }) {
+  platforms = ["tiktok", "shorts", "reels"], long, core, count = 3, candidates = 10, mustInclude = "", avoid,
+  log = console.log }) {
   fs.mkdirSync(outDir, { recursive: true });
   workDir = workDir || path.join(outDir, ".work");
   platforms = platforms.filter((p) => VERSIONS[p]);
@@ -58,8 +62,8 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
       try {
         return { file: await download.section(source, from, c.long.end + 2, path.join(workDir, "video"), `clip${i + 1}`), offset: from, temp: true };
       } catch (e) {
-        if (!/partially/i.test(e.message)) throw e;
-        log("step: this source can't be downloaded in parts: downloading the whole video once");
+        // Never throw away the moments, speech and AI work over a download hiccup: get the whole video instead.
+        log(`step: downloading just these minutes failed (${e.message.slice(0, 120)}): downloading the whole video once`);
         return { file: await download.full(source, path.join(workDir, "video")), offset: 0 };
       }
     };
@@ -80,7 +84,8 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   }
   const usable = moments.filter((m) => m.speech.words.length >= 8 && !m.speech.music); // music underneath = copyright claims
   log(`step: the brain picks the best ${count} of ${usable.length}`);
-  const { clips, note } = await pickClips(usable, { who, title, kind: tag === "podcast" ? "podcast" : "livestream", count, long, core, log });
+  const { clips, note } = await pickClips(usable, { who, title, kind: tag === "podcast" ? "podcast" : "livestream", count, long, core,
+    ...(avoid ? { avoid } : {}), log });
   if (!clips.length) throw new Error("no moment with enough speech (and no music underneath) was found");
 
   const outputs = [];
@@ -117,7 +122,7 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
     clips: clips.map((c, i) => ({
       clip: i + 1, score: c.score, by: c.by, hook: c.hook, why: c.why, reasons: c.reasons, peak: c.peak,
       long: { start: c.long.start, end: c.long.end }, core: { start: c.core.start, end: c.core.end },
-      caption: `${c.caption}${credit ? ` 🎥 ${credit}` : ""}`,
+      caption: `${c.caption}${credit ? ` 🎥 ${credit}` : ""}${mustInclude ? `\n\n${mustInclude}` : ""}`,
     })),
     outputs,
   };
@@ -140,7 +145,8 @@ if (require.main === module) {
   const camBox = opt.cam ? (([x, y, w, h]) => ({ x, y, w, h }))(opt.cam.split(",").map(Number)) : undefined;
   clipVideo({ source, outDir, layout: opt.layout || "auto", cam: camBox, credit: opt.credit || "", who: opt.who || "",
     title: opt.title || "", platforms: opt.platforms ? opt.platforms.split(",") : undefined, long: range(opt.long),
-    core: range(opt.core), count: Number(opt.count) || 3 })
+    core: range(opt.core), count: Number(opt.count) || 3, candidates: Number(opt.candidates) || 10, mustInclude: opt.must || "",
+    avoid: opt.avoid })
     .then((r) => console.log(JSON.stringify(r, null, 2)))
     .catch((e) => { console.error(`FAILED: ${e.message}`); process.exit(1); });
 }

@@ -33,7 +33,7 @@ function run(cmd, args, { cwd, onErr } = {}) {
     });
     p.on("error", reject);
     p.on("close", (code) => (code === 0 ? resolve(out)
-      : reject(new Error(`${path.basename(cmd)} failed: ${err.trim().split("\n").slice(-3).join(" | ")}`))));
+      : reject(new Error(`${path.basename(cmd)} failed: ${err.split("\n").map((l) => l.trim()).filter(Boolean).slice(-3).join(" | ")}`))));
   });
 }
 

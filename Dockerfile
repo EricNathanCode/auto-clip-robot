@@ -16,6 +16,9 @@ RUN curl -fsSL "https://github.com/ggml-org/whisper.cpp/archive/refs/tags/${WHIS
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg nodejs python3 python3-venv espeak-ng libgomp1 curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
+# The container runs with IPv6 switched off; without this, FFmpeg tries a site's IPv6 address first and gives up with
+# "cannot assign requested address" (exit 157). Prefer IPv4 answers for every program.
+RUN echo "precedence ::ffff:0:0/96  100" >> /etc/gai.conf
 # OpenCV for the face finder (headless = no screen libraries), in its own Python environment
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir opencv-python-headless
 # Models: Whisper small English (~466 MB) and the YuNet face finder (~230 KB)
@@ -36,7 +39,7 @@ COPY tools.js moments.js speech.js brain.js layout.js faces.py captions.js rende
 ENV WORK_DIR=/work PORT=8091 OLLAMA_URL=http://ollama:11434 BRAIN_MODEL=qwen2.5:7b THREADS=4 \
     WHISPER=/usr/local/bin/whisper-cli WHISPER_MODEL=/models/ggml-small.en.bin \
     PYTHON=/opt/venv/bin/python FACE_MODEL=/models/face_detection_yunet_2023mar.onnx FONTS_DIR=/app/fonts \
-    YTDLP=/app/bin/yt-dlp YTDLP_ARGS="--js-runtimes node" YTDLP_SELF_UPDATE=1
+    YTDLP=/app/bin/yt-dlp YTDLP_ARGS="--js-runtimes node --force-ipv4" YTDLP_SELF_UPDATE=1
 USER autoclip
 VOLUME /work
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s \
