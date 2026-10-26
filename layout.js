@@ -1,5 +1,6 @@
 // Decides how a 16:9 stream becomes a 9:16 clip, from where the faces are:
-//   🎮 streamer: a SMALL face that stays in one spot near an edge = a webcam box over gameplay → cam on top, gameplay below
+//   🎮 streamer: a SMALL face that stays in one spot near an edge = a webcam box over gameplay → cam on top, the whole
+//      game below
 //   🎙️ podcast: BIG faces = people talking → a full-height crop that follows the person on screen / whoever is speaking
 //   🕹️ gameplay: no steady face → the whole frame on a blurred copy of itself
 // A tag from the streamer list ("streamer" / "podcast") always wins over the guess.
@@ -179,11 +180,25 @@ function videoGraph(layout, src, extra = {}) {
     const topH = even(clamp(W * cam.h / cam.w, 540, 800)), botH = H - topH;
     if (cam.w / cam.h > W / topH) { const w = even(cam.h * W / topH); cam = { ...cam, x: even(cam.x + (cam.w - w) / 2), w }; }
     else if (cam.w / cam.h < W / topH) { const h = even(cam.w * topH / W); cam = { ...cam, y: even(cam.y + (cam.h - h) / 2), h }; }
-    const gw = even(Math.min(sw, sh * W / botH)), gx = even((sw - gw) / 2);
+    // Below it, the WHOLE game, so action on the left or right is never cut off (D032), on a blurred copy of itself; the
+    // captions sit in the blurred band between the cam and the game. The game picture starts at the webcam's border
+    // (D033): a cam on the left → from its right edge to the right side of the screen; on the right → the opposite. So
+    // the small webcam is gone from the game, and the game shows bigger. If that would leave too little game (a very
+    // wide cam), the full width is kept and the small webcam is blurred out instead.
+    const c = layout.cam, onLeft = c.x + c.w / 2 < sw / 2;
+    const gx = onLeft ? even(c.x + c.w) : 0, gw = even(onLeft ? sw - gx : c.x);
+    const cut = gw >= Math.max(sw / 2, W * sh / botH);
+    const gh = even(Math.min(botH, W * sh / (cut ? gw : sw))), gy = even((botH - gh) / 2);
+    const r = Math.max(1, Math.min(20, Math.floor(Math.min(c.w, c.h) / 4) - 1));
+    const game = cut ? `[game]crop=${gw}:${sh}:${gx}:0,` // the strip with the webcam is left out
+      : `[game]split=2[g][gc];[gc]crop=${c.w}:${c.h}:${c.x}:${c.y},boxblur=${r}:3[gcb];[g][gcb]overlay=${c.x}:${c.y},`;
+    const bh = even(270 * botH / W);
     return {
-      graph: `[0:v]split=2[cam][game];[cam]crop=${cam.w}:${cam.h}:${cam.x}:${cam.y},scale=${W}:${topH},setsar=1[top];` +
-        `[game]crop=${gw}:${sh}:${gx}:0,scale=${W}:${botH},setsar=1[bot];[top][bot]vstack=2[vbase]`,
-      captionY: topH + 40, hookY: 270, // below the top bar (TikTok's "Following | For You" ends ~180 px) and the credit
+      graph: `[0:v]split=3[cam][game][bg];[cam]crop=${cam.w}:${cam.h}:${cam.x}:${cam.y},scale=${W}:${topH},setsar=1[top];` +
+        `${game}scale=${W}:${gh},setsar=1[fg];` +
+        `[bg]${cut ? `crop=${gw}:${sh}:${gx}:0,` : ""}scale=270:${bh}:force_original_aspect_ratio=increase,crop=270:${bh},boxblur=10:2,scale=${W}:${botH},` +
+        `eq=brightness=-0.15,setsar=1[bgb];[bgb][fg]overlay=0:${gy}[bot];[top][bot]vstack=2[vbase]`,
+      captionY: topH + Math.round(gy / 2), hookY: 270, // hook below the top bar (TikTok's "Following | For You" ends ~180 px) and the credit
     };
   }
   if (layout.kind === "podcast") {

@@ -115,6 +115,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(parsed.words.map((w) => w.w).join("|") === "Okay|chat,|listen.", `joins word pieces + punctuation, skips special tokens and lone dashes (${parsed.words.map((w) => w.w).join(" ")})`);
   check(parsed.words[0].t0 === 100 && parsed.words[2].t1 === 101.15, "word times are moved to the stream's clock");
   check(parsed.music === true && parsed.sentences.length === 1, "notices [Music] and keeps it out of the captions");
+  const tok = (text, from) => ({ text, offsets: { from, to: from + 100 } });
+  const notes = fromWhisper({ transcription: [
+    { text: " It's in there. [BLANK_AUDIO]", tokens: [tok(" It's", 0), tok(" in", 100), tok(" there", 200), tok(".", 300), tok(" [", 400),
+      tok("BL", 500), tok("ANK", 600), tok("_AUD", 700), tok("IO", 800), tok("]", 900)] },
+    { text: " (upbeat music) He wins", tokens: [tok(" (", 1000), tok("up", 1100), tok("beat", 1200), tok(" music", 1300), tok(")", 1400),
+      tok(" He", 1500), tok(" wins", 1600)] }] }, 0);
+  check(notes.words.map((w) => w.w).join("|") === "It's|in|there.|He|wins" && notes.music,
+    `sound notes in pieces ([BLANK_AUDIO], (upbeat music)) never become captions, and the music is noticed (${notes.words.map((w) => w.w).join(" ")})`);
   const dtw = fromWhisper({ transcription: [{ text: " Hello there.", tokens: [{ text: " Hello", offsets: { from: 0, to: 900 }, t_dtw: 52 },
     { text: " there", offsets: { from: 900, to: 1400 }, t_dtw: 98 }, { text: ".", offsets: { from: 1400, to: 1450 }, t_dtw: 120 }] }] }, 10);
   check(dtw.words[0].t0 === 10.3 && dtw.words[1].t0 === 10.76 && dtw.words[0].t1 <= dtw.words[1].t0,
@@ -172,6 +180,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const cutKeys = speakerTrack(cut, [{ t0: 0, t1: 10 }], 0);
   check(cutKeys.length === 2 && cutKeys[1].jump && cutKeys[1].t === 5.02 && cutKeys[1].cx === 1450,
     `at a camera cut the crop jumps to the face in the new shot (${cutKeys.map((k) => `${k.t}s→${k.cx}`).join(", ")})`);
+  const hd = { width: 1920, height: 1080 };
+  const whole = videoGraph({ kind: "streamer", cam: { x: 0, y: 0, w: 400, h: 300 } }, hd);
+  check(whole.graph.includes("[game]crop=1520:1080:400:0,scale=1080:768") && whole.graph.includes("overlay=0:176") && whole.captionY === 888,
+    "streamer, cam on the left: the game from the cam's right edge to the right side, bigger, captions in the band between");
+  check(videoGraph({ kind: "streamer", cam: { x: 1520, y: 0, w: 400, h: 300 } }, hd).graph.includes("[game]crop=1520:1080:0:0,"),
+    "cam on the right: the game from the left side to the cam's left edge");
+  const bigCam = videoGraph({ kind: "streamer", cam: { x: 0, y: 0, w: 1000, h: 700 } }, hd).graph;
+  check(bigCam.includes("scale=1080:608") && bigCam.includes("[gc]crop=1000:700:0:0,boxblur"),
+    "a very wide cam would leave too little game: full width instead, small webcam blurred out");
   const wide = videoGraph({ kind: "streamer", cam: { x: 0, y: 0, w: 800, h: 200 } }, { width: 1920, height: 1080 });
   check(wide.graph.includes("crop=400:200:200:0,scale=1080:540"), "a very wide webcam is trimmed to fit the top, never stretched");
   const cutExpr = cropXExpr(cutKeys, 608, 1920);
@@ -207,6 +224,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     && /vcodec\^=avc1/.test(download.VIDEO), "YouTube gets one whole H.264 download; other sites try just the minutes first");
   const faces = await findFaces(stream, 10, 14, 1);
   check(faces.width === 1280 && faces.samples.length >= 3 && faces.samples.every((s) => s.faces.length === 0), "the face finder runs (and sees no face in a test pattern)");
+  const streamerOut = path.join(scratch, "streamer-layout.mp4"); // the pink box plays the webcam
+  await ff("-t", "1", "-i", stream, "-filter_complex", videoGraph({ kind: "streamer", cam: { x: 1000, y: 40, w: 250, h: 170 } }, info).graph,
+    "-map", "[vbase]", "-c:v", "libx264", "-preset", "ultrafast", streamerOut);
+  const so = await probe(streamerOut);
+  check(so.width === 1080 && so.height === 1920, "the streamer layout renders: cam on top, the whole game below on a blurred copy");
   const twoShots = path.join(scratch, "two-shots.mp4"); // 3 s of one "camera", then 3 s of another
   await ff("-f", "lavfi", "-i", "color=c=0x8B5CF6:s=320x180:r=30:d=3", "-f", "lavfi", "-i", "color=c=0xFDE68A:s=320x180:r=30:d=3",
     "-filter_complex", "[0][1]concat=n=2:v=1:a=0", "-c:v", "libx264", "-preset", "ultrafast", twoShots);

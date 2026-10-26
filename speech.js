@@ -4,9 +4,10 @@ const fs = require("fs");
 const path = require("path");
 const { TOOLS, run, round } = require("./tools");
 
-// Words that are really sound labels, not speech: Whisper writes these for music, laughter, applause…
-const SOUND_LABEL = /^[\[(](music|singing|laughter|laughs|applause|silence|blank_audio|inaudible|cheering|♪)[\])]$/i;
-const MUSIC = /[\[(](music|singing)[\])]|♪/i;
+// Sound notes Whisper writes instead of speech, in [ ] or ( ): [BLANK_AUDIO], (upbeat music), [Laughter]… They often
+// come split over several tokens ("[", "BL", "ANK", "_AUDIO", "]"), so brackets are followed across tokens and all that's
+// inside is left out of the words. A note about music means music under the talk (copyright claims): skip that moment.
+const MUSIC = /[\[(][^\])]*\b(music|singing|song)\b|♪/i;
 
 // Word timing: Whisper's normal token times wander (measured: from 1 s early to 0.2 s late), which made captions feel
 // out of sync. Its DTW mode (needs flash attention off, ~20% slower) lands every word ~0.23 s late, steadily, so we
@@ -30,8 +31,8 @@ async function transcribe(file, start, end, workDir) {
 }
 
 // Whisper gives tokens (pieces of words). A token that starts with a space begins a new word; the others (and
-// punctuation) stick to the word before. Special tokens like [_BEG_] and the lone dash Whisper writes when someone
-// breaks off mid-sentence ("we were in, -") are skipped.
+// punctuation) stick to the word before. Special tokens like [_BEG_], sound notes and the lone dash Whisper writes when
+// someone breaks off mid-sentence ("we were in, -") are skipped.
 const HAS_LETTER = /[\p{L}\p{N}]/u;
 function fromWhisper(json, offset = 0) {
   const words = [], sentences = [];
@@ -39,10 +40,16 @@ function fromWhisper(json, offset = 0) {
   for (const seg of json.transcription || []) {
     if (MUSIC.test(seg.text)) music = true;
     const first = words.length;
+    let depth = 0; // inside a [ ] or ( ) sound note
     for (const tok of seg.tokens || []) {
-      const text = tok.text;
-      if (!text || /^\[_/.test(text.trim()) || /^<\|.*\|>$/.test(text.trim())) continue; // [_BEG_], [_TT_150], <|endoftext|>
-      if (/^\s+[-–—]+\s*$/.test(text)) continue;
+      if (!tok.text || /^\[_/.test(tok.text.trim()) || /^<\|.*\|>$/.test(tok.text.trim())) continue; // [_BEG_], [_TT_150], <|endoftext|>
+      let text = "";
+      for (const ch of tok.text) {
+        if (ch === "[" || ch === "(") depth++;
+        else if (ch === "]" || ch === ")") depth = Math.max(0, depth - 1);
+        else if (!depth && ch !== "♪") text += ch;
+      }
+      if (!text.trim() || /^\s+[-–—]+\s*$/.test(text)) continue;
       const from = tok.t_dtw >= 0 ? tok.t_dtw / 100 - DTW_LAG : tok.offsets.from / 1000; // t_dtw is in 10 ms steps
       const t0 = round(offset + Math.max(0, from)), t1 = round(offset + tok.offsets.to / 1000);
       if ((/^\s/.test(text) && HAS_LETTER.test(text)) || !words.length || words.length === first && HAS_LETTER.test(text)) {
@@ -53,7 +60,7 @@ function fromWhisper(json, offset = 0) {
         last.t1 = Math.max(last.t1, t1);
       }
     }
-    const segWords = words.splice(first).filter((w) => HAS_LETTER.test(w.w) && !SOUND_LABEL.test(w.w));
+    const segWords = words.splice(first).filter((w) => HAS_LETTER.test(w.w));
     words.push(...segWords);
     if (segWords.length) {
       sentences.push({ text: segWords.map((w) => w.w).join(" "), t0: segWords[0].t0, t1: segWords[segWords.length - 1].t1,

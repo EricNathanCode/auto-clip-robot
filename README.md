@@ -17,7 +17,7 @@ link (YouTube / Twitch) or uploaded footage
                      Hooks must be true (no exaggeration about real people), banned topics score 1, emojis are removed
   → ⬇️ download.js  the picture in H.264 (YouTube: the whole video once, cut locally; elsewhere just the chosen minutes)
   → 🙂 layout.js    OpenCV YuNet finds faces: 🎮 streamer (the face that stays put near an edge = the webcam → cam on
-                     top, gameplay below) · 🎙️ podcast (shot by shot: the crop jumps with every camera cut and, in a
+                     top, the game below, cut at the webcam's border so the small cam is gone, on a blurred copy) · 🎙️ podcast (shot by shot: the crop jumps with every camera cut and, in a
                      wide shot, glides to whoever's mouth moves) · 🕹️ gameplay (blurred background).
                      webcam.py fits the cam to the webcam box's exact border (a sharp line in every frame while the
                      game behind it keeps changing)
@@ -55,7 +55,7 @@ time, and the big source file is deleted as soon as the clips are made.
 - yt-dlp updates itself daily (YouTube changes often).
 
 ## Tests
-`node test.js <scratchDir>`: **70 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
+`node test.js <scratchDir>`: **75 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
 voice and two hype moments), a fake Ollama, fake faces for the podcast layout, the whole job API, and a file:// link
 through yt-dlp. On the Dell: `docker run --rm -v /opt/autoclip/test.js:/app/test.js autoclip node test.js /tmp/autoclip-test`
 
