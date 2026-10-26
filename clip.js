@@ -1,9 +1,10 @@
-// Auto Clip Robot: turns one long stream / podcast into the 3 best vertical clips, each in a version per platform.
-//   (download.js: audio first) → moments.js (loud spikes) → speech.js (words) → brain.js (AI picks + hook)
-//   → (download.js: only the chosen minutes) → layout.js (faces) → render.js (MP4s)
+// Auto Clip Robot: turns one long stream / podcast into its best vertical clips (1 per 5 minutes of video, at most 10,
+// ranked 01 = best), each in a version per platform.
+//   (download.js: audio first) → moments.js (loud spikes) → speech.js (words) → brain.js (AI scores, ranks + hook)
+//   → (download.js: the picture) → layout.js (faces, webcam) → render.js (MP4s)
 // CLI: node clip.js <video file or URL> <outDir> [--layout auto|streamer|podcast] [--cam x,y,w,h] [--credit @name]
-//      [--who Name] [--title "…"] [--platforms tiktok,shorts,reels,x] [--long 61-70] [--core 30-60] [--count 3]
-//      [--must "#ad · text the campaign requires"] [--avoid "topics the campaign bans"] [--candidates 10]
+//      [--who Name] [--title "…"] [--platforms tiktok,shorts,reels,x] [--long 61-70] [--core 30-60] [--count auto|1-10]
+//      [--min-score 6] [--must "#ad · text the campaign requires"] [--avoid "topics the campaign bans"] [--candidates 4-15]
 const fs = require("fs");
 const path = require("path");
 const { probe, round, clamp } = require("./tools");
@@ -36,10 +37,16 @@ async function facesFor(file, start, end, every = 0.5, opts) {
   return findFaces(file, start, end, every, opts);
 }
 
+// How many clips a video gets when the job doesn't say (D031): one per 5 minutes, at least 1, at most 10.
+const clipCount = (seconds) => clamp(Math.floor(seconds / 300), 1, 10);
+
+// count: "auto" (clipCount) or a number. candidates: how many moments the AI rates (default: 1.5x the clips, 4-15;
+// each takes the Dell ~4-5 min). minScore: the AI score (1-10) a moment needs to become a clip, so a dull video
+// gives fewer clips. Clips come out ranked: 01 = best.
 // mustInclude: text a campaign requires in every post description (e.g. "#ad" + a line about the show).
 // avoid: topics this campaign bans (replaces the default list in brain.js).
 async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, credit = "", who = "", title = "",
-  platforms = ["tiktok", "shorts", "reels"], long, core, count = 3, candidates = 10, mustInclude = "", avoid,
+  platforms = ["tiktok", "shorts", "reels"], long, core, count = "auto", candidates, minScore = 6, mustInclude = "", avoid,
   log = console.log }) {
   fs.mkdirSync(outDir, { recursive: true });
   workDir = workDir || path.join(outDir, ".work");
@@ -78,20 +85,30 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   }
   const sound = await probe(analysis);
   if (!sound.hasAudio) throw new Error("no sound in this video: nothing to listen to or write down");
-  log(`source: ${round(sound.duration / 60, 1)} min`);
+  const want = count === "auto" ? clipCount(sound.duration) : count;
+  const rate = candidates || clamp(Math.ceil(want * 1.5), 4, 15);
+  log(`source: ${round(sound.duration / 60, 1)} min → up to ${want} clip${want > 1 ? "s" : ""} (the AI rates ${rate} moments; only score ${minScore}+ is kept)`);
 
   log("step: finding loud moments");
-  const moments = await findMoments(analysis, sound.duration, { count: candidates, extras: clues });
+  const moments = await findMoments(analysis, sound.duration, { count: rate, extras: clues });
   log(`step: writing down speech around ${moments.length} moments`);
   for (const [i, m] of moments.entries()) {
     m.speech = await transcribe(analysis, m.start, m.end, workDir);
     log(`speech ${i + 1}/${moments.length} at ${m.peak}s: ${m.speech.words.length} words${m.speech.music ? " (music!)" : ""}`);
   }
   const usable = moments.filter((m) => m.speech.words.length >= 8 && !m.speech.music); // music underneath = copyright claims
-  log(`step: the brain picks the best ${count} of ${usable.length}`);
-  const { clips, note } = await pickClips(usable, { who, title, game, kind: tag === "podcast" ? "podcast" : "livestream", count, long, core,
-    ...(avoid ? { avoid } : {}), log });
-  if (!clips.length) throw new Error("no moment with enough speech (and no music underneath) was found");
+  if (!usable.length) throw new Error("no moment with enough speech (and no music underneath) was found");
+  log(`step: the brain rates ${usable.length} moments and keeps up to ${want}`);
+  const { clips, note } = await pickClips(usable, { who, title, game, kind: tag === "podcast" ? "podcast" : "livestream", count: want,
+    minScore, long, core, ...(avoid ? { avoid } : {}), log });
+  if (!clips.length) { // nothing good enough: a finished job with no clips (and why), not an error
+    log(`result: no clips (${note})`);
+    const result = { ok: true, who, title, layout: null, note, clips: [], outputs: [] };
+    fs.writeFileSync(path.join(outDir, "result.json"), JSON.stringify(result, null, 2));
+    fs.rmSync(workDir, { recursive: true, force: true });
+    return result;
+  }
+  log(`ranked: ${clips.map((c) => `#${c.rank} score ${c.score} "${c.hook}"`).join(" · ")}`);
   // TikTok's long cut opens like the others and only runs on: if the written-down window ends too soon for that,
   // write down the next 45 s too (only for the chosen clips).
   const longLen = long || LENGTHS.long;
@@ -143,8 +160,8 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   }
   const result = {
     ok: true, who, title, layout: { kind: layout.kind, why: layout.why }, note,
-    clips: clips.map((c, i) => ({
-      clip: i + 1, score: c.score, by: c.by, hook: c.hook, why: c.why, reasons: c.reasons, peak: c.peak,
+    clips: clips.map((c, i) => ({ // best first: clip 1 = rank 1 = files 01-*.mp4
+      clip: i + 1, rank: c.rank, score: c.score, by: c.by, hook: c.hook, why: c.why, reasons: c.reasons, peak: c.peak,
       long: { start: c.long.start, end: c.long.end }, core: { start: c.core.start, end: c.core.end },
       caption: `${c.caption}${credit ? ` 🎥 ${credit}` : ""}${mustInclude ? `\n\n${mustInclude}` : ""}`,
     })),
@@ -155,7 +172,7 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   return result;
 }
 
-module.exports = { clipVideo, VERSIONS, PLATFORMS };
+module.exports = { clipVideo, clipCount, VERSIONS, PLATFORMS };
 
 if (require.main === module) {
   const [source, outDir, ...rest] = process.argv.slice(2);
@@ -169,8 +186,8 @@ if (require.main === module) {
   const camBox = opt.cam ? (([x, y, w, h]) => ({ x, y, w, h }))(opt.cam.split(",").map(Number)) : undefined;
   clipVideo({ source, outDir, layout: opt.layout || "auto", cam: camBox, credit: opt.credit || "", who: opt.who || "",
     title: opt.title || "", platforms: opt.platforms ? opt.platforms.split(",") : undefined, long: range(opt.long),
-    core: range(opt.core), count: Number(opt.count) || 3, candidates: Number(opt.candidates) || 10, mustInclude: opt.must || "",
-    avoid: opt.avoid })
+    core: range(opt.core), count: Number(opt.count) || "auto", candidates: Number(opt.candidates) || undefined,
+    minScore: opt["min-score"] ? Number(opt["min-score"]) : undefined, mustInclude: opt.must || "", avoid: opt.avoid })
     .then((r) => console.log(JSON.stringify(r, null, 2)))
     .catch((e) => { console.error(`FAILED: ${e.message}`); process.exit(1); });
 }

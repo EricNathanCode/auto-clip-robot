@@ -9,10 +9,10 @@ const { spawn } = require("child_process");
 const { TOOLS, run, probe } = require("./tools");
 const { excitement, pickPeaks, loudness, STEP } = require("./moments");
 const { fromWhisper, transcribe } = require("./speech");
-const { fitSpan, pickClips, lengthen, prompt, plain } = require("./brain");
+const { fitSpan, pickClips, rank, lengthen, prompt, plain } = require("./brain");
 const { decide, camBox, speakerTrack, cropXExpr, findFaces, shotCuts, webcamBorder, videoGraph } = require("./layout");
 const { chunks, buildAss, LOOKS } = require("./captions");
-const { clipVideo } = require("./clip");
+const { clipVideo, clipCount } = require("./clip");
 const download = require("./download");
 
 const scratch = path.resolve(process.argv[2] || "autoclip-test");
@@ -135,6 +135,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(later.long.start === 0 && later.long.end - later.long.start >= 61 && later.core.end === 11.75 && later.speech.words.length === 20,
     `more speech after the window lets TikTok's cut run over a minute from the same start (${(later.long.end - later.long.start).toFixed(1)} s)`);
 
+  console.log("\n--- HOW MANY CLIPS, AND WHICH FIRST (no tools) ---");
+  check([120, 600, 1500, 3000, 7200].map(clipCount).join(",") === "1,2,5,10,10", "1 clip per 5 minutes of video, at least 1, at most 10 (2 min, 10, 25, 50, 120 min → 1, 2, 5, 10, 10)");
+  const plan = (score, loud, start, by = "brain") => ({ score, loud, by, long: { start, end: start + 60 } });
+  const ranked = rank([plan(6, 1, 0), plan(8, 1, 100), plan(9, 2, 200), plan(8, 4, 300), plan(5, 9, 400), plan(9, 9, 230), plan(4, 1, 500, "loudness")], { count: 10, minScore: 6 });
+  check(ranked.map((p) => `${p.rank}:${p.score}`).join(" ") === "1:9 2:8 3:8 4:6 5:4" && ranked[1].loud === 4,
+    `ranked best first (a tie goes to the louder moment), none overlapping, AI scores under 6 dropped (${ranked.map((p) => p.score).join(", ")})`);
+  check(rank([plan(9, 1, 0), plan(8, 1, 100), plan(7, 1, 200)], { count: 2, minScore: 6 }).length === 2, "never more clips than asked for");
+
   console.log("\n--- LAYOUT FROM FACES (no tools) ---");
   const frame = (faces) => ({ width: 1920, height: 1080, samples: Array.from({ length: 20 }, (_, i) => ({ t: i * 0.5, faces })) });
   const small = decide(frame([{ x: 1600, y: 80, w: 120, h: 150, score: 0.9, mouth: 0.05 }]));
@@ -227,6 +235,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(c0 && c0.long.end - c0.long.start >= 20 && c0.core.end - c0.core.start >= 10 && c0.core.end - c0.core.start <= 18.5,
     `fits the lengths (long ${(c0.long.end - c0.long.start).toFixed(1)} s, core ${(c0.core.end - c0.core.start).toFixed(1)} s)`);
   check(c0 && c0.core.start === c0.long.start && c0.core.end <= c0.long.end, "every version opens on the same line; the long cut only runs on");
+  const picky = await pickClips([cand], { count: 1, minScore: 10, long: [20, 28], core: [10, 18] });
+  check(picky.clips.length === 0 && /no moment scored 10 or more \(best: 9\)/.test(picky.note), `a moment below the minimum score is skipped, and the note says why ("${picky.note}")`);
   process.env.OLLAMA_URL = "http://127.0.0.1:9";
   const offline = await pickClips([cand], { count: 1, long: [20, 28], core: [10, 18] });
   check(offline.clips[0]?.by === "loudness" && /not reachable/.test(offline.note) && offline.clips[0].hook, "with no brain it still picks a clip (and says so)");
@@ -266,10 +276,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(empty.status === 400 && (await api(port, "GET", "/jobs/empty/status")).json.status === "failed", "starting with no video is refused and the job says why");
   await api(port, "POST", "/jobs/bad");
   const bads = [{ url: "ftp://x" }, { url: "https://x", platforms: ["myspace"] }, { url: "https://x", long: [90, 20] },
-    { url: "https://x", layout: "sideways" }, { url: "https://x", count: 9 }];
+    { url: "https://x", layout: "sideways" }, { url: "https://x", count: 11 }, { url: "https://x", minScore: 0 }];
   const codes = [];
   for (const b of bads) { await api(port, "POST", "/jobs/bad"); codes.push((await api(port, "POST", "/jobs/bad/start", b)).status); }
-  check(codes.every((c) => c === 400), `bad url / platform / lengths / layout / count are refused (${codes.join(",")})`);
+  check(codes.every((c) => c === 400), `bad url / platform / lengths / layout / count / minScore are refused (${codes.join(",")})`);
   check((await api(port, "PUT", "/jobs/..%2F..%2Fescape/files/x.mp4", undefined, voice)).status !== 500 && !fs.existsSync(path.join(scratch, "escape")),
     "sneaky ../ names stay inside the work folder");
 

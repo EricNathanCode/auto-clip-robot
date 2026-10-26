@@ -118,7 +118,7 @@ async function planMoment(cand, ctx) {
   [, b] = longFrom(sentences, a, Math.max(b, cb), lengths);
   if (!hook) hook = sentences[a].words.slice(0, 6).map((w) => w.w).join(" ").replace(/[.,!?;:]+$/, "");
   return {
-    peak: cand.peak, score, by, reasons: cand.reasons,
+    peak: cand.peak, score, by, reasons: cand.reasons, loud: cand.score,
     long: { ...spanOf(sentences, a, b), sentences: [a, b] },
     core: { ...spanOf(sentences, a, cb), sentences: [a, cb] },
     hook: hook.split(/\s+/).slice(0, 6).join(" "),
@@ -140,7 +140,21 @@ function lengthen(plan, more, lengths) {
     until: more.words.length ? more.words[more.words.length - 1].t1 : plan.until };
 }
 
-// Plans every candidate, then keeps the best `count` that don't overlap much.
+// The ranking: best score first (a tie goes to the louder moment, not the longer one: once a long, quiet stream ending
+// won a tie), at most `count`, none overlapping, and none the AI scored below minScore (when the AI is off, scores
+// come from loudness alone and aren't held to it). Returned best first, each with its rank (1 = best).
+function rank(plans, { count = 3, minScore = 0 } = {}) {
+  const chosen = [];
+  for (const p of [...plans].sort((x, y) => y.score - x.score || y.loud - x.loud)) {
+    if (chosen.length >= count) break;
+    if (p.by === "brain" && p.score < minScore) continue;
+    const overlaps = chosen.some((c) => Math.min(c.long.end, p.long.end) - Math.max(c.long.start, p.long.start) > 10);
+    if (!overlaps) chosen.push(p);
+  }
+  return chosen.map((p, i) => ({ ...p, rank: i + 1 }));
+}
+
+// Plans every candidate, then ranks them. ctx.count = how many clips at most, ctx.minScore = the AI score a clip needs.
 async function pickClips(candidates, ctx = {}) {
   ctx.brainProblem = ctx.brainProblem ?? await brainProblem();
   const plans = [];
@@ -149,13 +163,10 @@ async function pickClips(candidates, ctx = {}) {
     if (p) plans.push(p);
     if (p) ctx.log?.(`moment ${c.peak}s: score ${p.score} (${p.by}) "${p.hook}"`);
   }
-  const chosen = [];
-  for (const p of plans.sort((x, y) => y.score - x.score || y.long.end - y.long.start - (x.long.end - x.long.start))) {
-    if (chosen.length >= (ctx.count || 3)) break;
-    const overlaps = chosen.some((c) => Math.min(c.long.end, p.long.end) - Math.max(c.long.start, p.long.start) > 10);
-    if (!overlaps) chosen.push(p);
-  }
-  return { clips: chosen.sort((x, y) => x.long.start - y.long.start), note: ctx.brainProblem || "" };
+  const clips = rank(plans, { count: ctx.count || 3, minScore: ctx.minScore || 0 });
+  const tooLow = !clips.length && plans.length
+    ? `no moment scored ${ctx.minScore} or more (best: ${Math.max(...plans.map((p) => p.score))})` : "";
+  return { clips, note: [ctx.brainProblem, tooLow].filter(Boolean).join("; ") };
 }
 
-module.exports = { pickClips, planMoment, lengthen, fitSpan, brainProblem, prompt, plain, LENGTHS, SCHEMA, AVOID };
+module.exports = { pickClips, planMoment, rank, lengthen, fitSpan, brainProblem, prompt, plain, LENGTHS, SCHEMA, AVOID };
