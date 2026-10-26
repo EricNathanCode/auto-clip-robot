@@ -182,10 +182,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     `at a camera cut the crop jumps to the face in the new shot (${cutKeys.map((k) => `${k.t}s→${k.cx}`).join(", ")})`);
   const hd = { width: 1920, height: 1080 };
   const whole = videoGraph({ kind: "streamer", cam: { x: 0, y: 0, w: 400, h: 300 } }, hd);
-  check(whole.graph.includes("[game]crop=1520:1080:400:0,scale=1080:768") && whole.graph.includes("overlay=0:176") && whole.captionY === 888,
-    "streamer, cam on the left: the game from the cam's right edge to the right side, bigger, captions in the band between");
-  check(videoGraph({ kind: "streamer", cam: { x: 1520, y: 0, w: 400, h: 300 } }, hd).graph.includes("[game]crop=1520:1080:0:0,"),
-    "cam on the right: the game from the left side to the cam's left edge");
+  check(whole.graph.includes("[game]crop=1492:1080:428:0,scale=1080:782") && whole.graph.includes("overlay=0:170") && whole.captionY === 885,
+    "streamer, cam on the left: the game from just past the cam's right edge to the right side, bigger, captions in the band between");
+  check(videoGraph({ kind: "streamer", cam: { x: 1520, y: 0, w: 400, h: 300 } }, hd).graph.includes("[game]crop=1492:1080:0:0,"),
+    "cam on the right: the game from the left side to just before the cam's left edge");
   const bigCam = videoGraph({ kind: "streamer", cam: { x: 0, y: 0, w: 1000, h: 700 } }, hd).graph;
   check(bigCam.includes("scale=1080:608") && bigCam.includes("[gc]crop=1000:700:0:0,boxblur"),
     "a very wide cam would leave too little game: full width instead, small webcam blurred out");
@@ -245,6 +245,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const asked = prompt(words.sentences, { long: [61, 70], core: [30, 60] });
   check(/playing the game The Masterplan/.test(prompt(words.sentences, { long: [61, 70], core: [30, 60], game: "The Masterplan" })), "the brain is told which game is played");
   check(/politics/.test(asked) && /TRUE to what is said/.test(asked) && /no emojis/.test(asked), "the brain is told: true hooks only, skip banned topics, no emojis");
+  check(/watching or reacting to a video[^.]*the score is 1/.test(asked), "the brain is told: someone watching a video instead of playing scores 1 (someone else's content)");
   check(/gambling/.test(prompt(words.sentences, { long: [61, 70], core: [30, 60], avoid: "gambling" })), "a campaign can set its own banned topics");
   check(plain("Child Labor? 🤔 #fyp") === "Child Labor?" && plain("🇵🇭 Wow 👍🏽") === "Wow", "emojis and hashtags are removed from on-screen text");
   const brainAnswer = { score: 9, start: 0, core_end: 1, end: 2, hook: "THIS KEYBOARD IS INSANE 🤯 #wow", caption: "test caption", why: "test" };

@@ -55,7 +55,7 @@ time, and the big source file is deleted as soon as the clips are made.
 - yt-dlp updates itself daily (YouTube changes often).
 
 ## Tests
-`node test.js <scratchDir>`: **75 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
+`node test.js <scratchDir>`: **76 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
 voice and two hype moments), a fake Ollama, fake faces for the podcast layout, the whole job API, and a file:// link
 through yt-dlp. On the Dell: `docker run --rm -v /opt/autoclip/test.js:/app/test.js autoclip node test.js /tmp/autoclip-test`
 

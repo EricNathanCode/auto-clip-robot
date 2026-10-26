@@ -185,8 +185,10 @@ function videoGraph(layout, src, extra = {}) {
     // (D033): a cam on the left → from its right edge to the right side of the screen; on the right → the opposite. So
     // the small webcam is gone from the game, and the game shows bigger. If that would leave too little game (a very
     // wide cam), the full width is kept and the small webcam is blurred out instead.
-    const c = layout.cam, onLeft = c.x + c.w / 2 < sw / 2;
-    const gx = onLeft ? even(c.x + c.w) : 0, gw = even(onLeft ? sw - gx : c.x);
+    // The cut is 1.5% of the width past the border: the border is found a hair inside the webcam (good for the top),
+    // which left a sliver of the webcam's frame in the game picture.
+    const c = layout.cam, onLeft = c.x + c.w / 2 < sw / 2, m = even(sw * 0.015);
+    const gx = onLeft ? even(c.x + c.w + m) : 0, gw = even(onLeft ? sw - gx : c.x - m);
     const cut = gw >= Math.max(sw / 2, W * sh / botH);
     const gh = even(Math.min(botH, W * sh / (cut ? gw : sw))), gy = even((botH - gh) / 2);
     const r = Math.max(1, Math.min(20, Math.floor(Math.min(c.w, c.h) / 4) - 1));

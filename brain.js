@@ -30,7 +30,7 @@ Here is what was said around one possible moment, as numbered sentences with the
 ${lines}
 
 Decide:
-- score: 1-10, how likely this moment is to go viral on its own (funny, surprising, emotional, hype, a great story or hot take = high; boring, filler, needs outside context = low). If the moment is mainly about ${avoid}, the score is 1.
+- score: 1-10, how likely this moment is to go viral on its own (funny, surprising, emotional, hype, a great story or hot take = high; boring, filler, needs outside context = low). If the moment is mainly about ${avoid}, the score is 1. If they are mainly watching or reacting to a video, a recording or someone else's clip instead of playing or talking themselves (lines like "let's watch this", "look at this video", talking about what someone in a video says or does), the score is 1: that is someone else's content.
 - start: the sentence number the clip opens on: the line that makes people stop scrolling, not filler. Every version starts here.
 - core_end: where the SHORT version ends (about ${core[0]}-${core[1]} seconds after start), on a complete thought or the reaction.
 - end: where the LONG version ends (about ${long[0]}-${long[1]} seconds after start): the same clip, just running on. Never end mid-story.
