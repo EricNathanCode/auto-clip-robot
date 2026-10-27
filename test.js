@@ -9,10 +9,10 @@ const { spawn } = require("child_process");
 const { TOOLS, run, probe } = require("./tools");
 const { excitement, pickPeaks, loudness, STEP } = require("./moments");
 const { fromWhisper, transcribe } = require("./speech");
-const { fitSpan, pickClips, rank, lengthen, prompt, plain } = require("./brain");
+const { fitSpan, pickClips, rank, compare, lengthen, prompt, plain, tidyHook, SCHEMA } = require("./brain");
 const { decide, camBox, speakerTrack, cropXExpr, findFaces, shotCuts, webcamBorder, videoGraph } = require("./layout");
 const { chunks, buildAss, isBad, censor, LOOKS } = require("./captions");
-const { clipVideo, clipCount, fillCams } = require("./clip");
+const { clipVideo, rateCount, fillCams } = require("./clip");
 const { renderVersion } = require("./render");
 const download = require("./download");
 
@@ -55,6 +55,8 @@ async function makeStream(dir) {
 }
 
 // A stand-in for Ollama that always answers the same clip plan (tests the plumbing, not the AI's taste).
+// answer: an object, or a function of the request (so the final round can get its own answer). server.asked keeps
+// every request.
 function fakeOllama(answer) {
   const server = http.createServer((req, res) => {
     let body = "";
@@ -62,9 +64,12 @@ function fakeOllama(answer) {
     req.on("end", () => {
       res.writeHead(200, { "Content-Type": "application/json" });
       if (req.url === "/api/tags") return res.end(JSON.stringify({ models: [{ name: TOOLS.brainModel() }] }));
-      res.end(JSON.stringify({ message: { content: JSON.stringify(answer) } }));
+      const ask = JSON.parse(body);
+      server.asked.push(ask);
+      res.end(JSON.stringify({ message: { content: JSON.stringify(typeof answer === "function" ? answer(ask) : answer) } }));
     });
   });
+  server.asked = [];
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
 }
 
@@ -145,7 +150,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     `more speech after the window lets TikTok's cut run over a minute from the same start (${(later.long.end - later.long.start).toFixed(1)} s)`);
 
   console.log("\n--- HOW MANY CLIPS, AND WHICH FIRST (no tools) ---");
-  check([120, 600, 1500, 3000, 7200].map(clipCount).join(",") === "1,2,5,10,10", "1 clip per 5 minutes of video, at least 1, at most 10 (2 min, 10, 25, 50, 120 min → 1, 2, 5, 10, 10)");
+  check([120, 600, 1740, 3600, 28800].map(rateCount).join(",") === "4,5,15,30,30",
+    "the AI rates 1 moment per 2 minutes of video, 4-30 (2 min, 10, 29, 60 min, 8 h → 4, 5, 15, 30, 30)");
   const plan = (score, loud, start, by = "brain") => ({ score, loud, by, long: { start, end: start + 60 } });
   const ranked = rank([plan(6, 1, 0), plan(8, 1, 100), plan(9, 2, 200), plan(8, 4, 300), plan(5, 9, 400), plan(9, 9, 230), plan(4, 1, 500, "loudness")], { count: 10, minScore: 6 });
   check(ranked.map((p) => `${p.rank}:${p.score}`).join(" ") === "1:9 2:8 3:8 4:6 5:4" && ranked[1].loud === 4,
@@ -266,8 +272,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(/watching or reacting to a video[^.]*the score is 1/.test(asked), "the brain is told: someone watching a video instead of playing scores 1 (someone else's content)");
   check(/gambling/.test(prompt(words.sentences, { long: [61, 70], core: [30, 60], avoid: "gambling" })), "a campaign can set its own banned topics");
   check(plain("Child Labor? 🤔 #fyp") === "Child Labor?" && plain("🇵🇭 Wow 👍🏽") === "Wow", "emojis and hashtags are removed from on-screen text");
+  check(/most moments of a video are 4-6/.test(asked) && /7 = worth posting/.test(asked) && Object.keys(SCHEMA.properties)[0] === "why",
+    "the brain gets a strict 1-10 scale and writes why before the score");
+  const withHooks = prompt(words.sentences, { long: [61, 70], core: [30, 60], hooks: ["Old Hook One"] });
+  check(/"Old Hook One"/.test(withHooks) && /must not start the same way/.test(withHooks) && /not like a video title/.test(withHooks),
+    "the brain sees the hooks it already wrote, and is told: no video-title hooks");
+  check(tidyHook("Shocking Childhood Story") === "Childhood Story" && tidyHook("You Won't Believe This Jump!") === "This Jump!",
+    `clickbait words are taken out of hooks ("${tidyHook("Shocking Childhood Story")}")`);
   const brainAnswer = { score: 9, start: 0, core_end: 1, end: 2, hook: "THIS KEYBOARD IS INSANE 🤯 #wow", caption: "test caption", why: "test" };
-  const fake = await fakeOllama(brainAnswer);
+  const finalAnswer = { scores: [{ clip: 0, score: 7 }, { clip: 1, score: 12 }] };
+  const fake = await fakeOllama((ask) => (ask.format?.properties?.scores ? finalAnswer : brainAnswer));
   process.env.OLLAMA_URL = `http://127.0.0.1:${fake.address().port}`;
   const cand = { peak: 15, score: 3, reasons: ["loud"], start: 0, end: 30, speech: words };
   const picked = await pickClips([cand], { count: 1, long: [20, 28], core: [10, 18] });
@@ -276,6 +290,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(c0 && c0.long.end - c0.long.start >= 20 && c0.core.end - c0.core.start >= 10 && c0.core.end - c0.core.start <= 18.5,
     `fits the lengths (long ${(c0.long.end - c0.long.start).toFixed(1)} s, core ${(c0.core.end - c0.core.start).toFixed(1)} s)`);
   check(c0 && c0.core.start === c0.long.start && c0.core.end <= c0.long.end, "every version opens on the same line; the long cut only runs on");
+  fake.asked.length = 0;
+  await pickClips([cand, { ...cand, peak: 25 }], { count: 5, long: [20, 28], core: [10, 18] });
+  check(fake.asked.length === 2 && /"THIS KEYBOARD IS INSANE"/.test(fake.asked[1].messages[0].content), "the second moment's hook is written knowing the first one");
+  const tied = rank([{ ...c0, hook: "Quiet one", score: 8, loud: 1 }, { ...c0, hook: "Loud one", score: 8, loud: 2, long: { start: 100, end: 120 } }], { count: 10 });
+  const final = await compare(tied, { minScore: 7 });
+  check(final.map((c) => `${c.rank}:${c.hook}:${c.alone}→${c.score}`).join(" ") === "1:Quiet one:8→10 2:Loud one:8→7",
+    `final round: the clips compared side by side get new scores (7-10) and a new order (${final.map((c) => `${c.hook} ${c.score}`).join(", ")})`);
   const picky = await pickClips([cand], { count: 1, minScore: 10, long: [20, 28], core: [10, 18] });
   check(picky.clips.length === 0 && /no moment scored 10 or more \(best: 9\)/.test(picky.note), `a moment below the minimum score is skipped, and the note says why ("${picky.note}")`);
   process.env.OLLAMA_URL = "http://127.0.0.1:9";
@@ -317,7 +338,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(empty.status === 400 && (await api(port, "GET", "/jobs/empty/status")).json.status === "failed", "starting with no video is refused and the job says why");
   await api(port, "POST", "/jobs/bad");
   const bads = [{ url: "ftp://x" }, { url: "https://x", platforms: ["myspace"] }, { url: "https://x", long: [90, 20] },
-    { url: "https://x", layout: "sideways" }, { url: "https://x", count: 11 }, { url: "https://x", minScore: 0 }];
+    { url: "https://x", layout: "sideways" }, { url: "https://x", count: 31 }, { url: "https://x", minScore: 0 }];
   const codes = [];
   for (const b of bads) { await api(port, "POST", "/jobs/bad"); codes.push((await api(port, "POST", "/jobs/bad/start", b)).status); }
   check(codes.every((c) => c === 400), `bad url / platform / lengths / layout / count / minScore are refused (${codes.join(",")})`);

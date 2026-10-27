@@ -1,6 +1,6 @@
 # 🐟 Auto Clip Robot
 
-A self-hosted clipping robot for my homelab: it turns a long **livestream or podcast** into its **best vertical clips** (1 per 5 minutes, up to 10, ranked)
+A self-hosted clipping robot for my homelab: it turns a long **livestream or podcast** into its **best vertical clips** (every moment the AI scores 7+, ranked)
 (1080×1920), each in a version per platform, with **word-by-word captions**, an AI-written **hook title** and a
 **credit** to the creator. Runs **CPU-only** on an old Dell OptiPlex (Proxmox → Debian LXC → Docker), orchestrated by
 **n8n**, with a local AI (**Ollama**). Sister project of the [Auto Edit Robot](https://github.com/EricNathanCode/auto-edit-robot).
@@ -11,10 +11,12 @@ A self-hosted clipping robot for my homelab: it turns a long **livestream or pod
 ```
 link (YouTube / Twitch) or uploaded footage
   → 🔊 moments.js   loud spikes, "silence → explosion", optional YouTube "most replayed" peaks   (audio only, cheap)
-  → 🗣️ speech.js    whisper.cpp (small.en) writes down ONLY the candidate windows (1.5× the clips wanted), with word timings
-  → 🧠 brain.js     the local AI scores each moment 1-10 (only 6+ become clips, best first), picks one opening + a short and a long end (by sentence number,
-                     never by timestamp), writes a hook title and a caption; falls back to loudness if the AI is off.
-                     Hooks must be true (no exaggeration about real people), banned topics score 1, emojis are removed
+  → 🗣️ speech.js    whisper.cpp (small.en) writes down ONLY the candidate windows (1 per 2 minutes of video, 4-30), with word timings
+  → 🧠 brain.js     the local AI scores each moment 1-10 on a strict scale (it says why first), picks one opening + a short and
+                     a long end (by sentence number, never by timestamp), writes a hook title (different from the ones before
+                     it) and a caption; every moment scoring 7+ becomes a clip. A final round compares the clips side by side
+                     and ranks them. Falls back to loudness if the AI is off.
+                     Hooks must be true (no exaggeration about real people, no clickbait words), banned topics score 1, emojis are removed
   → ⬇️ download.js  the picture in H.264 (YouTube: the whole video once, cut locally; elsewhere just the chosen minutes)
   → 🙂 layout.js    OpenCV YuNet finds faces: 🎮 streamer (the face that stays put near an edge = the webcam → cam on
                      top, the game below, cut at the webcam's border so the small cam is gone, on a blurred copy) · 🎙️ podcast (shot by shot: the crop jumps with every camera cut and, in a
@@ -41,7 +43,7 @@ A campaign's own length rule replaces the defaults. Different cuts and looks mea
 | `GET /health` | ffmpeg / yt-dlp / whisper model check, `busy` (so n8n can take turns with the Auto Edit Robot) |
 | `POST /jobs/<job>` | reserve a job |
 | `PUT /jobs/<job>/files/<name>` | upload footage (e.g. a campaign's Drive file) |
-| `POST /jobs/<job>/start` | JSON `{ url?, layout, cam?, credit, who, title, platforms, long, core, count?, minScore?, candidates?, mustInclude?, avoid? }` → 202, runs in the background (`count` = `"auto"` (default: 1 clip per 5 min of video, max 10) or 1–10; `minScore` = the AI score a clip needs, default 6; `mustInclude` = text a campaign requires in every caption, e.g. `#ad`; `avoid` = topics it bans). Clips are ranked: `01-*.mp4` = best |
+| `POST /jobs/<job>/start` | JSON `{ url?, layout, cam?, credit, who, title, platforms, long, core, count?, minScore?, candidates?, mustInclude?, avoid? }` → 202, runs in the background (`count` = `"auto"` (default: every moment scoring `minScore`+, no limit) or 1–30 (the best N); `minScore` = the AI score a clip needs, default 7; `candidates` = moments the AI rates (default 1 per 2 min, 4–30; ~4–5 min each on the Dell); `mustInclude` = text a campaign requires in every caption, e.g. `#ad`; `avoid` = topics it bans). Clips are ranked: `01-*.mp4` = best |
 | `GET /jobs/<job>/status` | queued / working (+ step) / done (+ clips, hooks, captions, files) / failed (+ reason) |
 | `GET /jobs/<job>/clips/<file>` | download one MP4 |
 | `DELETE /jobs/<job>` | clean up |
@@ -56,7 +58,7 @@ time, and the big source file is deleted as soon as the clips are made.
 - yt-dlp updates itself daily (YouTube changes often).
 
 ## Tests
-`node test.js <scratchDir>`: **80 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
+`node test.js <scratchDir>`: **85 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
 voice and two hype moments), a fake Ollama, fake faces for the podcast layout, the whole job API, and a file:// link
 through yt-dlp. On the Dell: `docker run --rm -v /opt/autoclip/test.js:/app/test.js autoclip node test.js /tmp/autoclip-test`
 

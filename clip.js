@@ -1,10 +1,10 @@
-// Auto Clip Robot: turns one long stream / podcast into its best vertical clips (1 per 5 minutes of video, at most 10,
-// ranked 01 = best), each in a version per platform.
+// Auto Clip Robot: turns one long stream / podcast into its best vertical clips (every moment the AI scores 7+, no
+// limit, ranked 01 = best), each in a version per platform.
 //   (download.js: audio first) → moments.js (loud spikes) → speech.js (words) → brain.js (AI scores, ranks + hook)
 //   → (download.js: the picture) → layout.js (faces, webcam) → render.js (MP4s)
 // CLI: node clip.js <video file or URL> <outDir> [--layout auto|streamer|podcast] [--cam x,y,w,h] [--credit @name]
-//      [--who Name] [--title "…"] [--platforms tiktok,shorts,reels,x] [--long 61-70] [--core 30-60] [--count auto|1-10]
-//      [--min-score 6] [--must "#ad · text the campaign requires"] [--avoid "topics the campaign bans"] [--candidates 4-15]
+//      [--who Name] [--title "…"] [--platforms tiktok,shorts,reels,x] [--long 61-70] [--core 30-60] [--count auto|1-30]
+//      [--min-score 7] [--must "#ad · text the campaign requires"] [--avoid "topics the campaign bans"] [--candidates 4-30]
 const fs = require("fs");
 const path = require("path");
 const { probe, round, clamp } = require("./tools");
@@ -64,16 +64,17 @@ const fillCams = (found) => {
   return found.map((f) => f.box || found.find((o) => o.box && same(f.face, o.face))?.box || null);
 };
 
-// How many clips a video gets when the job doesn't say (D031): one per 5 minutes, at least 1, at most 10.
-const clipCount = (seconds) => clamp(Math.floor(seconds / 300), 1, 10);
+// How many moments the AI rates when the job doesn't say (D035): one per 2 minutes of video, so it looks all over it,
+// 4-30 (each takes the Dell ~4-5 min: 30 ≈ 2.5 h).
+const rateCount = (seconds) => clamp(Math.ceil(seconds / 120), 4, 30);
 
-// count: "auto" (clipCount) or a number. candidates: how many moments the AI rates (default: 1.5x the clips, 4-15;
-// each takes the Dell ~4-5 min). minScore: the AI score (1-10) a moment needs to become a clip, so a dull video
-// gives fewer clips. Clips come out ranked: 01 = best.
+// count: "auto" (no limit: every moment scoring minScore+) or a number (the best N). candidates: how many moments the
+// AI rates (default: rateCount, or 1.5x a set count). minScore: the AI score (1-10) a moment needs to become a clip,
+// so a dull video gives fewer clips. Clips come out ranked: 01 = best.
 // mustInclude: text a campaign requires in every post description (e.g. "#ad" + a line about the show).
 // avoid: topics this campaign bans (replaces the default list in brain.js).
 async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, credit = "", who = "", title = "",
-  platforms = ["tiktok", "shorts", "reels"], long, core, count = "auto", candidates, minScore = 6, mustInclude = "", avoid,
+  platforms = ["tiktok", "shorts", "reels"], long, core, count = "auto", candidates, minScore = 7, mustInclude = "", avoid,
   log = console.log }) {
   fs.mkdirSync(outDir, { recursive: true });
   workDir = workDir || path.join(outDir, ".work");
@@ -112,9 +113,9 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   }
   const sound = await probe(analysis);
   if (!sound.hasAudio) throw new Error("no sound in this video: nothing to listen to or write down");
-  const want = count === "auto" ? clipCount(sound.duration) : count;
-  const rate = candidates || clamp(Math.ceil(want * 1.5), 4, 15);
-  log(`source: ${round(sound.duration / 60, 1)} min → up to ${want} clip${want > 1 ? "s" : ""} (the AI rates ${rate} moments; only score ${minScore}+ is kept)`);
+  const want = count === "auto" ? Infinity : count;
+  const rate = candidates || (count === "auto" ? rateCount(sound.duration) : clamp(Math.ceil(count * 1.5), 4, 30));
+  log(`source: ${round(sound.duration / 60, 1)} min → the AI rates ${rate} moments; ${count === "auto" ? "every one" : `the best ${count}`} scoring ${minScore}+ becomes a clip`);
 
   log("step: finding loud moments");
   const moments = await findMoments(analysis, sound.duration, { count: rate, extras: clues });
@@ -125,7 +126,7 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   }
   const usable = moments.filter((m) => m.speech.words.length >= 8 && !m.speech.music); // music underneath = copyright claims
   if (!usable.length) throw new Error("no moment with enough speech (and no music underneath) was found");
-  log(`step: the brain rates ${usable.length} moments and keeps up to ${want}`);
+  log(`step: the brain rates ${usable.length} moments${count === "auto" ? "" : ` and keeps up to ${count}`}`);
   const { clips, note } = await pickClips(usable, { who, title, game, kind: tag === "podcast" ? "podcast" : "livestream", count: want,
     minScore, long, core, ...(avoid ? { avoid } : {}), log });
   if (!clips.length) { // nothing good enough: a finished job with no clips (and why), not an error
@@ -203,7 +204,7 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   return result;
 }
 
-module.exports = { clipVideo, clipCount, fillCams, VERSIONS, PLATFORMS };
+module.exports = { clipVideo, rateCount, fillCams, VERSIONS, PLATFORMS };
 
 if (require.main === module) {
   const [source, outDir, ...rest] = process.argv.slice(2);

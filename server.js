@@ -3,7 +3,7 @@
 //   POST   /jobs/<job>                → reserves a fresh job ("receiving") before its source is sent
 //   PUT    /jobs/<job>/files/<name>   → raw body: a source video (campaign footage from Drive), saved to <job>/in/<name>
 //   POST   /jobs/<job>/start          → JSON body { url?, layout, cam?, credit, who, title, platforms, long, core,
-//                                       count? ("auto" = 1 per 5 min, max 10), minScore? (6), candidates?, mustInclude?, avoid? }:
+//                                       count? ("auto" = every moment scoring minScore+, no limit), minScore? (7), candidates?, mustInclude?, avoid? }:
 //                                       starts clipping in the background (an uploaded file, or the url) and answers 202
 //   GET    /jobs/<job>/status         → { status: receiving | queued | working | done | failed, step, seconds, result | error }
 //   GET    /jobs/<job>/clips/<file>   → one finished MP4 (names are listed in result.outputs)
@@ -95,13 +95,13 @@ function checkOptions(body, jobDir) {
     if (!(lo >= 5 && hi <= 180 && lo < hi)) return { error: `${k} must be [min, max] seconds between 5 and 180` };
     o[k] = [lo, hi];
   }
-  o.count = body.count === undefined || body.count === "auto" ? "auto" : Number(body.count); // auto = 1 per 5 min, max 10
-  if (o.count !== "auto" && !(o.count >= 1 && o.count <= 10)) return { error: 'count must be "auto" or 1-10' };
-  if (body.candidates !== undefined) { // moments the AI rates (fewer = faster); default: 1.5x the clips
+  o.count = body.count === undefined || body.count === "auto" ? "auto" : Number(body.count); // auto = no limit
+  if (o.count !== "auto" && !(o.count >= 1 && o.count <= 30)) return { error: 'count must be "auto" or 1-30' };
+  if (body.candidates !== undefined) { // moments the AI rates (fewer = faster); default: 1 per 2 min (4-30)
     o.candidates = Number(body.candidates);
-    if (!(o.candidates >= (o.count === "auto" ? 1 : o.count) && o.candidates <= 15)) return { error: "candidates must be between count and 15" };
+    if (!(o.candidates >= (o.count === "auto" ? 1 : o.count) && o.candidates <= 30)) return { error: "candidates must be between count and 30" };
   }
-  o.minScore = body.minScore === undefined ? 6 : Number(body.minScore); // the AI score (1-10) a clip needs
+  o.minScore = body.minScore === undefined ? 7 : Number(body.minScore); // the AI score (1-10) a clip needs
   if (!(o.minScore >= 1 && o.minScore <= 10)) return { error: "minScore must be 1-10" };
   o.mustInclude = String(body.mustInclude || "").slice(0, 500); // campaign's required post text (#ad, show name…)
   if (body.avoid) o.avoid = String(body.avoid).slice(0, 300); // campaign's banned topics
