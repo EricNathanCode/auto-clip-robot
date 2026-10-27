@@ -4,7 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const { TOOLS, run, round } = require("./tools");
 const { videoGraph } = require("./layout");
-const { buildAss } = require("./captions");
+const { buildAss, isBad } = require("./captions");
 
 const MAX_FPS = () => Number(process.env.OUTPUT_FPS) || 60;
 const PRESET = () => process.env.RENDER_PRESET || "veryfast"; // the Dell's CPU: fast preset, quality kept by CRF
@@ -29,8 +29,16 @@ async function renderVersion({ file, seek, src, start, end, layout, keys, words,
   const { graph, captionY, hookY } = videoGraph(layout, src, { keys });
   fs.writeFileSync(path.join(workDir, `${name}.ass`), buildAss({ words, clipStart: start, clipEnd: end, look, hook, credit, captionY, hookY }));
   const fps = Math.min(MAX_FPS(), Math.round(src.fps) || 30);
-  const filter = `${graph};[vbase]fps=${fps},ass=${name}.ass:fontsdir=fonts,format=yuv420p[v]` +
-    (src.hasAudio ? ";[0:a]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]" : "");
+  // Bad words (captions.js) are muted and a 1 kHz beep plays over them instead (a little wider than the word, since
+  // word timings are a few hundredths of a second off).
+  const beeps = words.filter((w) => w.t1 > start && w.t0 < end && isBad(w.w))
+    .map((w) => `between(t,${round(Math.max(0, w.t0 - start - 0.06))},${round(Math.min(end - start, w.t1 - start + 0.06))})`).join("+");
+  const loud = "loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000";
+  const audio = !src.hasAudio ? "" : !beeps ? `;[0:a]${loud}[a]`
+    : `;[0:a]volume=0:enable='${beeps}',${loud},aformat=channel_layouts=stereo[spoken];` +
+      `aevalsrc='0.25*sin(2*PI*1000*t)*(${beeps})':s=48000:d=${round(end - start)},aformat=channel_layouts=stereo[beep];` +
+      "[spoken][beep]amix=inputs=2:normalize=0:duration=first[a]";
+  const filter = `${graph};[vbase]fps=${fps},ass=${name}.ass:fontsdir=fonts,format=yuv420p[v]${audio}`;
   const args = ["-y", "-v", "error", "-ss", String(seek), "-t", String(round(end - start)), "-i", path.resolve(file),
     "-filter_complex", filter, "-map", "[v]", ...(src.hasAudio ? ["-map", "[a]", "-c:a", "aac", "-b:a", "160k"] : ["-an"]),
     "-c:v", "libx264", "-preset", PRESET(), "-crf", "21", "-profile:v", "high", "-movflags", "+faststart",

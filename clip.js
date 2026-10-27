@@ -11,6 +11,7 @@ const { probe, round, clamp } = require("./tools");
 const { findMoments } = require("./moments");
 const { transcribe } = require("./speech");
 const { pickClips, lengthen, LENGTHS } = require("./brain");
+const { censor } = require("./captions");
 const { findFaces, decide, speakerTrack, webcamBorder } = require("./layout");
 const { renderVersion } = require("./render");
 const download = require("./download");
@@ -36,6 +37,32 @@ async function facesFor(file, start, end, every = 0.5, opts) {
   }
   return findFaces(file, start, end, every, opts);
 }
+
+// The webcam can change size or place between the parts of an edited video (one streamer's grew between two streams), so
+// with the whole video on disk each clip gets the webcam border found around its own moment: from the face seen during
+// the clip, over the 5 (then 13) minutes around it. A clip where that isn't clear borrows the box of a clip with the
+// face in the same spot (same part of the video). Returns a box (or null = keep the job's) per clip.
+async function webcamPerClip(file, duration, clips, log) {
+  const found = [];
+  for (const c of clips) {
+    const face = decide(await facesFor(file, c.long.start, c.long.end, 1, { cuts: false }), "streamer").face;
+    const mid = (c.long.start + c.long.end) / 2;
+    let box = null;
+    for (const half of face ? [150, 400] : []) {
+      box = await webcamBorder(file, Math.max(0, mid - half), Math.min(duration, mid + half), face);
+      if (box) break;
+    }
+    found.push({ face, box });
+  }
+  return fillCams(found).map((box, i) => {
+    log(`clip ${i + 1}: webcam ${found[i].box ? "border found" : box ? "border borrowed from a clip with the face in the same spot" : "kept from the whole video"}`);
+    return box;
+  });
+}
+const fillCams = (found) => {
+  const same = (a, b) => a && b && Math.abs(a.x - b.x) < a.w * 0.5 && Math.abs(a.y - b.y) < a.h * 0.5;
+  return found.map((f) => f.box || found.find((o) => o.box && same(f.face, o.face))?.box || null);
+};
 
 // How many clips a video gets when the job doesn't say (D031): one per 5 minutes, at least 1, at most 10.
 const clipCount = (seconds) => clamp(Math.floor(seconds / 300), 1, 10);
@@ -120,7 +147,7 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   }
 
   const outputs = [];
-  let layout;
+  let layout, clipCams = [];
   for (const [i, c] of clips.entries()) {
     const video = await getVideo(c, i);
     const src = await probe(video.file);
@@ -137,9 +164,13 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
       if (layout.face && wholeVideo && !process.env.FAKE_FACES) { // fit the cam to the webcam box's real border
         const border = await webcamBorder(video.file, 0, src.duration, layout.face);
         if (border) layout = { ...layout, cam: border, why: `${layout.why}, webcam border found` };
+        log(`layout: ${layout.kind} (${layout.why})`);
+        if (layout.kind === "streamer") clipCams = await webcamPerClip(video.file, src.duration, clips, log);
+      } else {
+        log(`layout: ${layout.kind} (${layout.why})`);
       }
-      log(`layout: ${layout.kind} (${layout.why})`);
     }
+    const clipLayout = clipCams[i] ? { ...layout, cam: clipCams[i] } : layout;
     for (const p of platforms) {
       const v = VERSIONS[p], span = c[v.span];
       const start = round(clamp(span.start + v.nudge, video.offset, span.end - 5)), end = span.end;
@@ -152,7 +183,7 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
       }
       const name = `${String(i + 1).padStart(2, "0")}-${p}`;
       log(`step: rendering clip ${i + 1} for ${p} (${round(end - start, 1)} s)`);
-      const r = await renderVersion({ file: video.file, seek: round(start - video.offset), src, start, end, layout, keys,
+      const r = await renderVersion({ file: video.file, seek: round(start - video.offset), src, start, end, layout: clipLayout, keys,
         words: c.speech.words, hook: c.hook, credit, look: v.look, outFile: path.join(outDir, `${name}.mp4`), workDir, name });
       outputs.push({ clip: i + 1, platform: p, file: `${name}.mp4`, seconds: r.seconds, renderSeconds: r.renderSeconds });
     }
@@ -161,9 +192,9 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   const result = {
     ok: true, who, title, layout: { kind: layout.kind, why: layout.why }, note,
     clips: clips.map((c, i) => ({ // best first: clip 1 = rank 1 = files 01-*.mp4
-      clip: i + 1, rank: c.rank, score: c.score, by: c.by, hook: c.hook, why: c.why, reasons: c.reasons, peak: c.peak,
+      clip: i + 1, rank: c.rank, score: c.score, by: c.by, hook: censor(c.hook), why: c.why, reasons: c.reasons, peak: c.peak,
       long: { start: c.long.start, end: c.long.end }, core: { start: c.core.start, end: c.core.end },
-      caption: `${c.caption}${credit ? ` 🎥 ${credit}` : ""}${mustInclude ? `\n\n${mustInclude}` : ""}`,
+      caption: `${censor(c.caption)}${credit ? ` 🎥 ${credit}` : ""}${mustInclude ? `\n\n${mustInclude}` : ""}`,
     })),
     outputs,
   };
@@ -172,7 +203,7 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   return result;
 }
 
-module.exports = { clipVideo, clipCount, VERSIONS, PLATFORMS };
+module.exports = { clipVideo, clipCount, fillCams, VERSIONS, PLATFORMS };
 
 if (require.main === module) {
   const [source, outDir, ...rest] = process.argv.slice(2);

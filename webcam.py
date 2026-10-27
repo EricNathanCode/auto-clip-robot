@@ -42,22 +42,30 @@ def main():
     cols = np.zeros((SH, SW), np.float32)  # strength of a vertical line
     rows[1:-1] = np.abs(F[:, 2:] - F[:, :-2]).mean(axis=0)
     cols[:, 1:-1] = np.abs(F[:, :, 2:] - F[:, :, :-2]).mean(axis=0)
+    change = F.std(axis=0)  # how much each pixel changes: the still room little, the game a lot
     cx, cy, w, h = (fx + fw / 2) * s, (fy + fh / 2) * s, fw * s, fh * s
     x0, x1, y0, y1 = cx - w, cx + w, cy - h, cy + h
 
-    def coverage(side, v):
-        # side: line strengths with the positions across axis 1 and the side's length along axis 0. How much of the
-        # length has a clear line at v (stronger than the lines just inside and outside it)? The webcam border: ~0.9;
-        # a straight edge in the streamer's room (a shelf, a light strip): ~0.15.
+    def coverage(side, var, v, inside_before):
+        # side: line strengths with the positions across axis 1 and the side's length along axis 0 (var: the same for
+        # `change`). How much of the length has a clear line at v (stronger than the lines just inside and outside it)
+        # with MORE change outside it than inside? The webcam border: ~0.9. A straight edge in the streamer's room (a
+        # shelf, a door frame) has the still room on both sides, so it doesn't count, even when it runs the full height.
         here = side[:, v]
         before = np.median(side[:, max(0, v - 8):max(1, v - 2)], axis=1)
         after = np.median(side[:, v + 3:v + 9], axis=1) if v + 3 < side.shape[1] else np.zeros_like(here)
         # (the side towards a busy chat box can be almost as lined as the border, so that side only needs beating)
-        return float(np.mean((here > 2 * np.minimum(before, after) + 2) & (here > 1.15 * np.maximum(before, after))))
+        line = (here > 2 * np.minimum(before, after) + 2) & (here > 1.15 * np.maximum(before, after))
+        near, far = var[:, max(0, v - 10):max(1, v - 2)], var[:, v + 3:v + 11]
+        if not far.size:
+            return 0.0
+        inside, outside = (near, far) if inside_before else (far, near)
+        moves = np.median(outside, axis=1) > 1.3 * np.median(inside, axis=1) + 2
+        return float(np.mean(line & moves))
 
-    def best(side, lo, hi, frame_edge, centre):
+    def best(side, var, lo, hi, frame_edge, centre):
         # the full-length line nearest the face (chat boxes further out make lines too); none: the frame edge
-        found = [(coverage(side, v), v) for v in range(max(1, int(lo)), min(int(hi), side.shape[1] - 1))]
+        found = [(coverage(side, var, v, v > centre), v) for v in range(max(1, int(lo)), min(int(hi), side.shape[1] - 1))]
         found = [f for f in found if f[0] >= 0.6]
         if not found:
             return (0.0, frame_edge)
@@ -66,12 +74,12 @@ def main():
 
     for _ in range(3):  # each side depends on the others' span, so settle them in a few rounds
         a, b = int(max(0, y0)), int(min(SH, y1))
-        left = best(cols[a:b], 1, cx - 0.55 * w, 0, cx)
-        right = best(cols[a:b], cx + 0.55 * w, SW - 1, SW, cx)
+        left = best(cols[a:b], change[a:b], 1, cx - 0.55 * w, 0, cx)
+        right = best(cols[a:b], change[a:b], cx + 0.55 * w, SW - 1, SW, cx)
         x0, x1 = left[1], right[1]
         a, b = int(max(0, x0)), int(min(SW, x1))
-        upper = best(rows[:, a:b].T, 1, cy - 0.55 * h, 0, cy)
-        lower = best(rows[:, a:b].T, cy + 0.55 * h, SH - 1, SH, cy)
+        upper = best(rows[:, a:b].T, change[:, a:b].T, 1, cy - 0.55 * h, 0, cy)
+        lower = best(rows[:, a:b].T, change[:, a:b].T, cy + 0.55 * h, SH - 1, SH, cy)
         y0, y1 = upper[1], lower[1]
 
     sides = [round(v[0], 2) if v[1] not in (0, SW, SH) else "edge" for v in (left, upper, right, lower)]

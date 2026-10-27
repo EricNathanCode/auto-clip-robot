@@ -16,6 +16,13 @@ const LOOKS = {
 };
 const MAX_WORDS = 3, MAX_CHARS = 16;
 
+// Words TikTok, YouTube and Instagram punish (less reach, age limits, removed clips): shown as ***** in the captions,
+// hook and post text, and beeped in the sound (render.js). Mild ones (damn, hell, crap) stay. A word Whisper already
+// starred out ("f**k") counts too.
+const BAD = /^(?:mother)?fuck|^(?:bull|horse)?shit|^bitch|^cunt|^dick(?:s|head|heads)?$|^cocks?$|^cocksuck|^puss(?:y|ies)$|^(?:ass|asses|asshole|assholes|dumbass|jackass)$|^bastards?$|^whores?$|^sluts?$|^nigg|^fag(?:s|got|gots)?$|^retard(?:s|ed)?$|^twats?$|^wank|^pricks?$/;
+const isBad = (word) => /\w\*|\*\w/.test(word) || BAD.test(String(word).toLowerCase().replace(/[^a-z]/g, ""));
+const censor = (text) => String(text).split(/(\s+)/).map((t) => (isBad(t) ? t.replace(/[\p{L}\p{N}]/gu, "*") : t)).join("");
+
 const ts = (s) => {
   s = Math.max(0, s);
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
@@ -65,7 +72,8 @@ function buildAss({ words, clipStart, clipEnd, look = "pop", hook = "", credit =
   const lines = [];
   const inClip = words.filter((w) => w.t1 > clipStart && w.t0 < clipEnd)
     .map((w) => ({ w: clean(L.upper ? w.w.toUpperCase() : w.w), t0: w.t0 - clipStart, t1: w.t1 - clipStart }))
-    .filter((w) => /[\p{L}\p{N}]/u.test(w.w)); // a lone "-" or "..." is not a word to show
+    .filter((w) => /[\p{L}\p{N}]/u.test(w.w)) // a lone "-" or "..." is not a word to show
+    .map((w) => ({ ...w, w: censor(w.w) }));
   const groups = chunks(inClip);
   groups.forEach((g, gi) => {
     const next = groups[gi + 1];
@@ -78,9 +86,9 @@ function buildAss({ words, clipStart, clipEnd, look = "pop", hook = "", credit =
       lines.push(`Dialogue: 1,${ts(a)},${ts(b)},Cap,,0,0,0,,{\\an5\\pos(${W / 2},${captionY})}${text}`);
     });
   });
-  if (hook) lines.push(`Dialogue: 2,${ts(0)},${ts(Math.min(hookSeconds, clipEnd - clipStart))},Hook,,0,0,0,,{\\fad(120,250)}${clean(hook)}`);
+  if (hook) lines.push(`Dialogue: 2,${ts(0)},${ts(Math.min(hookSeconds, clipEnd - clipStart))},Hook,,0,0,0,,{\\fad(120,250)}${censor(clean(hook))}`);
   if (credit) lines.push(`Dialogue: 0,${ts(0)},${ts(clipEnd - clipStart)},Credit,,0,0,0,,${clean(credit)}`);
   return header(L, { captionY, hookY }) + lines.join("\n") + "\n";
 }
 
-module.exports = { buildAss, chunks, LOOKS, ts: (s) => ts(round(s)) };
+module.exports = { buildAss, chunks, isBad, censor, LOOKS, ts: (s) => ts(round(s)) };

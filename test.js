@@ -11,8 +11,9 @@ const { excitement, pickPeaks, loudness, STEP } = require("./moments");
 const { fromWhisper, transcribe } = require("./speech");
 const { fitSpan, pickClips, rank, lengthen, prompt, plain } = require("./brain");
 const { decide, camBox, speakerTrack, cropXExpr, findFaces, shotCuts, webcamBorder, videoGraph } = require("./layout");
-const { chunks, buildAss, LOOKS } = require("./captions");
-const { clipVideo, clipCount } = require("./clip");
+const { chunks, buildAss, isBad, censor, LOOKS } = require("./captions");
+const { clipVideo, clipCount, fillCams } = require("./clip");
+const { renderVersion } = require("./render");
 const download = require("./download");
 
 const scratch = path.resolve(process.argv[2] || "autoclip-test");
@@ -206,6 +207,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(!/ -|-\{|\}-/.test(dash.split("[Events]")[1]) && Object.keys(LOOKS).every((k) => !/^Style: Cap(,[^,]*){14},3,/m.test(buildAss({ words: [], clipStart: 0, clipEnd: 1, look: k }))),
     "a lone dash is never shown, and no caption look darkens the picture with a box");
   check(/^Style: Credit(,[^,]*){17},7,/m.test(ass), "the creator's name sits top-left");
+  check(["fuck!", "Fucking", "bullshit", "BITCH", "dick", "f**k"].every(isBad) && !["class", "assassin", "Dickens", "cocktail", "damn", "hell"].some(isBad),
+    "bad words are caught (fuck, bullshit, bitch, f**k…), but not words that only contain them (class, Dickens) or mild ones (damn, hell)");
+  const rude = buildAss({ words: [{ w: "what", t0: 1, t1: 1.3 }, { w: "the", t0: 1.3, t1: 1.5 }, { w: "fuck!", t0: 1.5, t1: 1.9 }], clipStart: 0, clipEnd: 3,
+    hook: "Holy shit moment" });
+  check(!/fuck|shit/i.test(rude) && rude.includes("****!") && rude.includes("Holy **** moment") && censor("You bitch.") === "You *****.",
+    "bad words show as ***** in captions and hooks (punctuation kept)");
 
   console.log("\n--- TOOLS: LOUDNESS, SPEECH, FACES ---");
   const { voice, stream } = await makeStream(scratch);
@@ -224,6 +231,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     && /vcodec\^=avc1/.test(download.VIDEO), "YouTube gets one whole H.264 download; other sites try just the minutes first");
   const faces = await findFaces(stream, 10, 14, 1);
   check(faces.width === 1280 && faces.samples.length >= 3 && faces.samples.every((s) => s.faces.length === 0), "the face finder runs (and sees no face in a test pattern)");
+  const beeped = path.join(scratch, "beeped.mp4");
+  await renderVersion({ file: stream, seek: 10, src: info, start: 10, end: 14, layout: { kind: "gameplay" }, words: [{ w: "oh", t0: 10.5, t1: 10.8 },
+    { w: "shit!", t0: 11, t1: 11.4 }, { w: "nice", t0: 12, t1: 12.3 }], hook: "", credit: "", look: "pop", outFile: beeped,
+    workDir: path.join(scratch, "beep-work"), name: "beep" });
+  const bp = await probe(beeped);
+  check(bp.hasAudio && bp.hasVideo && near(bp.duration, 4, 0.3), "a clip with a bad word renders, with the word muted and beeped");
+  const camA = { x: 0, y: 0, w: 400, h: 300 }, camB = { x: 0, y: 0, w: 500, h: 360 };
+  const filled = fillCams([{ face: { x: 100, y: 80, w: 60, h: 70 }, box: camA }, { face: { x: 110, y: 85, w: 60, h: 70 }, box: null },
+    { face: { x: 120, y: 160, w: 80, h: 90 }, box: camB }, { face: { x: 400, y: 500, w: 60, h: 70 }, box: null }]);
+  check(filled[1] === camA && filled[2] === camB && filled[3] === null,
+    "a clip whose webcam border wasn't clear borrows the box of a clip with the face in the same spot (or keeps the video's)");
   const streamerOut = path.join(scratch, "streamer-layout.mp4"); // the pink box plays the webcam
   await ff("-t", "1", "-i", stream, "-filter_complex", videoGraph({ kind: "streamer", cam: { x: 1000, y: 40, w: 250, h: 170 } }, info).graph,
     "-map", "[vbase]", "-c:v", "libx264", "-preset", "ultrafast", streamerOut);
