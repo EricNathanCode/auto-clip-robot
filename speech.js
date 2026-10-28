@@ -13,10 +13,14 @@ const MUSIC = /[\[(][^\])]*\b(music|singing|song)\b|♪/i;
 // out of sync. Its DTW mode (needs flash attention off, ~20% slower) lands every word ~0.23 s late, steadily, so we
 // use it and take that lag off. The DTW preset is the model's name (small.en, medium…).
 const DTW_LAG = 0.22;
-const dtwPreset = () => (/(tiny|base|small|medium)(\.en)?/.exec(path.basename(TOOLS.whisperModel())) || [""])[0];
+const dtwPreset = () => process.env.WHISPER_DTW ||
+  (/(tiny|base|small|medium)(\.en)?/.exec(path.basename(TOOLS.whisperModel())) || [""])[0];
 
-// Writes down [start, end] of a file. Returns { words: [{ w, t0, t1 }], sentences: [{ text, t0, t1, words }], music }
-// with times in seconds from the start of the FILE (not of the window).
+// Writes down [start, end] of a file. Returns { words: [{ w, t0, t1 }], sentences: [{ text, t0, t1, words }], music,
+// note? } with times in seconds from the start of the FILE (not of the window).
+// On the Dell, the word-timing mode once failed on a piece (and, run again, was still busy after 9 min) that the
+// normal mode reads in seconds, so: a time limit (normal is well under the piece's length), and if the timing mode
+// fails, one more try without it (word times a little less exact; `note` says so).
 async function transcribe(file, start, end, workDir) {
   fs.mkdirSync(workDir, { recursive: true });
   const base = path.join(workDir, `speech-${Math.round(start * 1000)}`);
@@ -29,11 +33,20 @@ async function transcribe(file, start, end, workDir) {
     return { words: [], sentences: [], music: false };
   }
   const dtw = dtwPreset();
-  await run(TOOLS.whisper(), ["-m", TOOLS.whisperModel(), "-f", `${base}.wav`, "-t", String(TOOLS.threads()),
-    "-l", "en", "-ojf", "-of", base, "-np", ...(dtw ? ["-dtw", dtw, "-nfa"] : [])]);
+  const args = ["-m", TOOLS.whisperModel(), "-f", `${base}.wav`, "-t", String(TOOLS.threads()), "-l", "en", "-ojf", "-of", base, "-np"];
+  const limitMs = Math.max(180, 4 * (end - start)) * 1000;
+  let note = "";
+  try {
+    await run(TOOLS.whisper(), [...args, ...(dtw ? ["-dtw", dtw, "-nfa"] : [])], { limitMs });
+  } catch (e) {
+    if (!dtw) throw e;
+    note = `word timing off: ${e.message}`;
+    await run(TOOLS.whisper(), args, { limitMs }).catch((e2) => { throw new Error(`${e2.message} (and with word timing: ${e.message})`); });
+  } finally {
+    fs.rmSync(`${base}.wav`, { force: true });
+  }
   const json = JSON.parse(fs.readFileSync(`${base}.json`, "utf8"));
-  fs.rmSync(`${base}.wav`, { force: true });
-  return fromWhisper(json, start);
+  return { ...fromWhisper(json, start), ...(note ? { note } : {}) };
 }
 
 // Whisper gives tokens (pieces of words). A token that starts with a space begins a new word; the others (and

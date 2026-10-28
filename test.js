@@ -230,6 +230,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const said = words.words.map((w) => w.w.toLowerCase()).join(" ");
   check(/keyboard/.test(said) && /chat/.test(said), `the speech AI writes down the voice ("${said.slice(0, 60)}…")`);
   check(words.words.every((w, i, a) => w.t1 >= w.t0 && (i === 0 || w.t0 >= a[i - 1].t0)), "word times go forward");
+  process.env.WHISPER_DTW = "no-such-preset"; // the word-timing mode fails (exit 3), like it once did on the Dell
+  const retried = await transcribe(voice, 0, 30, path.join(scratch, "speech")).catch((e) => ({ words: [], note: e.message }));
+  delete process.env.WHISPER_DTW;
+  check(retried.words.length >= 5 && /word timing off: whisper-cli(\.exe)? failed \(exit 3\)/.test(retried.note || ""),
+    `when the word-timing mode fails, the piece is written down again without it (${retried.words.length} words, "${(retried.note || "").slice(0, 60)}")`);
+  const stuck = await run(TOOLS.ffmpeg(), ["-v", "error", "-f", "lavfi", "-i", "anullsrc", "-f", "null", "-"], { limitMs: 1500 })
+    .then(() => "", (e) => e.message);
+  check(/failed \(stopped after/.test(stuck), `a program that runs too long is stopped ("${stuck.slice(0, 50)}")`);
   const silent = await transcribe(voice, 500, 575, path.join(scratch, "speech")).catch((e) => ({ error: e.message }));
   check(silent.words?.length === 0 && !silent.error, `a stretch with no sound in the file gives no words instead of failing (${silent.error || "ok"})`);
   const fileUrl = (f) => "file:///" + f.replace(/\\/g, "/").replace(/^\//, "");

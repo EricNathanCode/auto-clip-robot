@@ -20,20 +20,27 @@ const TOOLS = {
   threads: () => Number(env("THREADS", "4")),
 };
 
-// Runs a program and resolves with its stdout. On failure the error carries the last lines of stderr.
+// Runs a program and resolves with its stdout. On failure the error says how it ended (exit code, or the signal of a
+// crash) and carries the last lines of stderr.
 // onErr (optional) sees stderr as it arrives, for programs that report on stderr (FFmpeg analysis filters).
-function run(cmd, args, { cwd, onErr } = {}) {
+// limitMs (optional): stop the program if it runs longer (a stuck program must never freeze a whole job).
+function run(cmd, args, { cwd, onErr, limitMs } = {}) {
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args, { windowsHide: true, cwd });
-    let out = "", err = "";
+    let out = "", err = "", late = false;
+    const timer = limitMs && setTimeout(() => { late = true; p.kill("SIGKILL"); }, limitMs);
     p.stdout.on("data", (d) => (out += d));
     p.stderr.on("data", (d) => {
       err = (err + d).slice(-4000);
       if (onErr) onErr(String(d));
     });
-    p.on("error", reject);
-    p.on("close", (code) => (code === 0 ? resolve(out)
-      : reject(new Error(`${path.basename(cmd)} failed: ${err.split("\n").map((l) => l.trim()).filter(Boolean).slice(-3).join(" | ")}`))));
+    p.on("error", (e) => { clearTimeout(timer); reject(e); });
+    p.on("close", (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) return resolve(out);
+      const how = late ? `stopped after ${round(limitMs / 60000, 1)} min` : signal ? `crashed (${signal})` : `exit ${code}`;
+      reject(new Error(`${path.basename(cmd)} failed (${how}): ${err.split("\n").map((l) => l.trim()).filter(Boolean).slice(-3).join(" | ")}`));
+    });
   });
 }
 
