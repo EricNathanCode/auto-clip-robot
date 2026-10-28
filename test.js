@@ -230,6 +230,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const said = words.words.map((w) => w.w.toLowerCase()).join(" ");
   check(/keyboard/.test(said) && /chat/.test(said), `the speech AI writes down the voice ("${said.slice(0, 60)}…")`);
   check(words.words.every((w, i, a) => w.t1 >= w.t0 && (i === 0 || w.t0 >= a[i - 1].t0)), "word times go forward");
+  const silent = await transcribe(voice, 500, 575, path.join(scratch, "speech")).catch((e) => ({ error: e.message }));
+  check(silent.words?.length === 0 && !silent.error, `a stretch with no sound in the file gives no words instead of failing (${silent.error || "ok"})`);
   const fileUrl = (f) => "file:///" + f.replace(/\\/g, "/").replace(/^\//, "");
   const soundOnly = await download.full(fileUrl(voice), path.join(scratch, "dl-sound")).then(() => "accepted", (e) => e.message);
   check(/without picture/.test(soundOnly) && !fs.existsSync(path.join(scratch, "dl-sound", "full.mp4")), `a download with sound but no picture is refused and deleted ("${soundOnly}")`);
@@ -311,6 +313,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   }
   fs.writeFileSync(path.join(scratch, "faces.json"), JSON.stringify(fakeFaces));
   process.env.FAKE_FACES = path.join(scratch, "faces.json");
+  const realWhisper = process.env.WHISPER;
+  process.env.WHISPER = path.join(scratch, "no-such-whisper");
+  const deaf = await clipVideo({ source: stream, outDir: path.join(scratch, "deaf"), platforms: ["reels"], count: 1,
+    long: [20, 28], core: [10, 18], log: () => {} }).catch((e) => ({ error: e.message }));
+  if (realWhisper === undefined) delete process.env.WHISPER; else process.env.WHISPER = realWhisper;
+  check(/no moment with enough speech/.test(deaf.error || ""), `a moment that can't be written down is skipped, not the end of the job ("${deaf.error}")`);
   const pod = await clipVideo({ source: stream, outDir: path.join(scratch, "podcast"), platforms: ["reels"], count: 1,
     long: [20, 28], core: [10, 18], credit: "@pod", log: () => {} });
   delete process.env.FAKE_FACES;

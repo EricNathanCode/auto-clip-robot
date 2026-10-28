@@ -121,7 +121,13 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   const moments = await findMoments(analysis, sound.duration, { count: rate, extras: clues });
   log(`step: writing down speech around ${moments.length} moments`);
   for (const [i, m] of moments.entries()) {
-    m.speech = await transcribe(analysis, m.start, m.end, workDir);
+    try {
+      m.speech = await transcribe(analysis, m.start, m.end, workDir);
+    } catch (e) { // one unreadable spot in the sound must not sink the whole job: that moment is skipped
+      m.speech = { words: [], sentences: [], music: false };
+      log(`speech ${i + 1}/${moments.length} at ${m.peak}s: skipped, could not write it down (${e.message.slice(0, 150)})`);
+      continue;
+    }
     log(`speech ${i + 1}/${moments.length} at ${m.peak}s: ${m.speech.words.length} words${m.speech.music ? " (music!)" : ""}`);
   }
   const usable = moments.filter((m) => m.speech.words.length >= 8 && !m.speech.music); // music underneath = copyright claims
@@ -143,7 +149,8 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   for (const [i, c] of clips.entries()) {
     if (!platforms.some((p) => VERSIONS[p].span === "long") || c.long.end - c.long.start >= longLen[0] || c.until >= sound.duration - 1) continue;
     log(`step: writing down what comes next, so clip ${i + 1} runs over ${longLen[0]} s on TikTok`);
-    const more = await transcribe(analysis, c.until, Math.min(sound.duration, c.until + 45), workDir);
+    const more = await transcribe(analysis, c.until, Math.min(sound.duration, c.until + 45), workDir)
+      .catch((e) => (log(`could not write down what comes next (${e.message.slice(0, 150)}): clip ${i + 1} stays shorter`), { music: true }));
     if (!more.music) clips[i] = lengthen(c, more, { long: longLen }); // music underneath: stay shorter, no claim
   }
 

@@ -22,6 +22,12 @@ async function transcribe(file, start, end, workDir) {
   const base = path.join(workDir, `speech-${Math.round(start * 1000)}`);
   await run(TOOLS.ffmpeg(), ["-y", "-v", "error", "-ss", String(start), "-to", String(end), "-i", file,
     "-vn", "-ar", "16000", "-ac", "1", `${base}.wav`]);
+  // A stretch with no sound in the file (a gap in the download, or past its end) gives an empty WAV, which whisper-cli
+  // refuses to read: nothing was said there.
+  if (fs.statSync(`${base}.wav`).size < 1000) {
+    fs.rmSync(`${base}.wav`, { force: true });
+    return { words: [], sentences: [], music: false };
+  }
   const dtw = dtwPreset();
   await run(TOOLS.whisper(), ["-m", TOOLS.whisperModel(), "-f", `${base}.wav`, "-t", String(TOOLS.threads()),
     "-l", "en", "-ojf", "-of", base, "-np", ...(dtw ? ["-dtw", dtw, "-nfa"] : [])]);
