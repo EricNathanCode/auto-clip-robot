@@ -7,7 +7,7 @@
 //      [--min-score 7] [--must "#ad · text the campaign requires"] [--avoid "topics the campaign bans"] [--candidates 4-30]
 const fs = require("fs");
 const path = require("path");
-const { probe, round, clamp } = require("./tools");
+const { probe, retry, round, clamp } = require("./tools");
 const { findMoments } = require("./moments");
 const { transcribe } = require("./speech");
 const { pickClips, lengthen, LENGTHS } = require("./brain");
@@ -25,6 +25,8 @@ const VERSIONS = {
   x: { span: "core", look: "pop", nudge: -0.3 },
 };
 const PLATFORMS = Object.keys(VERSIONS);
+const RETRY_WAITS = [20, 60]; // seconds before the 2nd and 3rd try of a download
+const WHOLE_MAX_MIN = 90; // a stream longer than this is never downloaded whole
 const isUrl = (s) => /^(https?|file):\/\//i.test(s);
 
 // Faces (and camera cuts) for a stretch of a video file, or a stand-in for tests (FAKE_FACES = a JSON file shaped like
@@ -92,18 +94,24 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
     log(`video: "${meta.title}" by ${meta.who}, ${round(meta.duration / 60, 1)} min${game ? `, game: ${game}` : ""}${clues.length ? `, ${clues.length} most-replayed peaks` : ""}`);
     log("step: downloading the audio only");
     analysis = await download.audioOnly(source, path.join(workDir, "audio"));
+    // A site sometimes drops a request (Twitch once did, after 4 hours of work): try again after a short wait.
+    const again = (e, wait) => log(`step: the download failed (${e.message}): trying again in ${wait} s`);
     getVideo = async (c, i) => {
       if (download.isYouTube(source)) { // cutting YouTube online is unreliable: one whole download, cut locally
         log(i === 0 ? "step: downloading the video once (H.264, max 1080p)" : `step: reusing the downloaded video for clip ${i + 1}`);
-        return { file: await download.full(source, path.join(workDir, "video")), offset: 0 };
+        return { file: await retry(() => download.full(source, path.join(workDir, "video")), RETRY_WAITS, again), offset: 0 };
       }
       const from = Math.max(0, c.long.start - 2);
       log(`step: downloading ${round(c.long.end + 2 - from)} s of video for clip ${i + 1}`);
       try {
-        return { file: await download.section(source, from, c.long.end + 2, path.join(workDir, "video"), `clip${i + 1}`), offset: from, temp: true };
+        const file = await retry(() => download.section(source, from, c.long.end + 2, path.join(workDir, "video"), `clip${i + 1}`),
+          RETRY_WAITS, again);
+        return { file, offset: from, temp: true };
       } catch (e) {
-        // Never throw away the moments, speech and AI work over a download hiccup: get the whole video instead.
-        log(`step: downloading just these minutes failed (${e.message.slice(0, 120)}): downloading the whole video once`);
+        // The whole of a long stream is many GB (3 h 51 at 1080p60 = 12 GB, and fixing it up needs as much again):
+        // skip this clip instead. A shorter video is downloaded whole once.
+        if (meta.duration > WHOLE_MAX_MIN * 60) throw Object.assign(e, { skip: true });
+        log(`step: downloading just these minutes failed (${e.message}): downloading the whole video once`);
         return { file: await download.full(source, path.join(workDir, "video")), offset: 0 };
       }
     };
@@ -117,47 +125,71 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   const rate = candidates || (count === "auto" ? rateCount(sound.duration) : clamp(Math.ceil(count * 1.5), 4, 30));
   log(`source: ${round(sound.duration / 60, 1)} min → the AI rates ${rate} moments; ${count === "auto" ? "every one" : `the best ${count}`} scoring ${minScore}+ becomes a clip`);
 
-  log("step: finding loud moments");
-  const moments = await findMoments(analysis, sound.duration, { count: rate, extras: clues });
-  log(`step: writing down speech around ${moments.length} moments`);
-  for (const [i, m] of moments.entries()) {
-    try {
-      m.speech = await transcribe(analysis, m.start, m.end, workDir);
-    } catch (e) { // one unreadable spot in the sound must not sink the whole job: that moment is skipped
-      m.speech = { words: [], sentences: [], music: false };
-      log(`speech ${i + 1}/${moments.length} at ${m.peak}s: skipped, could not write it down (${e.message})`);
-      continue;
+  // The slow part (speech + the AI: hours for a long stream) is saved, so a job that fails later (a download hiccup, a
+  // full disk) continues from here when it's run again with the same settings.
+  const saved = path.join(workDir, "plans.json");
+  const key = JSON.stringify({ source: String(source), tag, who, title, platforms, long, core, count, candidates, minScore, avoid });
+  const before = (() => { try { return JSON.parse(fs.readFileSync(saved, "utf8")); } catch { return null; } })();
+  let clips, note;
+  if (before?.key === key) {
+    ({ clips, note } = before);
+    log(`step: reusing the speech and AI picks saved by an earlier run (${clips.length} clips)`);
+  } else {
+    ({ clips, note } = await planClips());
+    if (!clips.length) { // nothing good enough: a finished job with no clips (and why), not an error
+      log(`result: no clips (${note})`);
+      const result = { ok: true, who, title, layout: null, note, clips: [], outputs: [] };
+      fs.writeFileSync(path.join(outDir, "result.json"), JSON.stringify(result, null, 2));
+      fs.rmSync(workDir, { recursive: true, force: true });
+      return result;
     }
-    log(`speech ${i + 1}/${moments.length} at ${m.peak}s: ${m.speech.words.length} words${m.speech.music ? " (music!)" : ""}${m.speech.note ? ` (${m.speech.note})` : ""}`);
-  }
-  const usable = moments.filter((m) => m.speech.words.length >= 8 && !m.speech.music); // music underneath = copyright claims
-  if (!usable.length) throw new Error("no moment with enough speech (and no music underneath) was found");
-  log(`step: the brain rates ${usable.length} moments${count === "auto" ? "" : ` and keeps up to ${count}`}`);
-  const { clips, note } = await pickClips(usable, { who, title, game, kind: tag === "podcast" ? "podcast" : "livestream", count: want,
-    minScore, long, core, ...(avoid ? { avoid } : {}), log });
-  if (!clips.length) { // nothing good enough: a finished job with no clips (and why), not an error
-    log(`result: no clips (${note})`);
-    const result = { ok: true, who, title, layout: null, note, clips: [], outputs: [] };
-    fs.writeFileSync(path.join(outDir, "result.json"), JSON.stringify(result, null, 2));
-    fs.rmSync(workDir, { recursive: true, force: true });
-    return result;
+    fs.writeFileSync(saved, JSON.stringify({ key, clips, note }));
   }
   log(`ranked: ${clips.map((c) => `#${c.rank} score ${c.score} "${c.hook}"`).join(" · ")}`);
-  // TikTok's long cut opens like the others and only runs on: if the written-down window ends too soon for that,
-  // write down the next 45 s too (only for the chosen clips).
-  const longLen = long || LENGTHS.long;
-  for (const [i, c] of clips.entries()) {
-    if (!platforms.some((p) => VERSIONS[p].span === "long") || c.long.end - c.long.start >= longLen[0] || c.until >= sound.duration - 1) continue;
-    log(`step: writing down what comes next, so clip ${i + 1} runs over ${longLen[0]} s on TikTok`);
-    const more = await transcribe(analysis, c.until, Math.min(sound.duration, c.until + 45), workDir)
-      .catch((e) => (log(`could not write down what comes next (${e.message}): clip ${i + 1} stays shorter`), { music: true }));
-    if (!more.music) clips[i] = lengthen(c, more, { long: longLen }); // music underneath: stay shorter, no claim
+
+  async function planClips() {
+    log("step: finding loud moments");
+    const moments = await findMoments(analysis, sound.duration, { count: rate, extras: clues });
+    log(`step: writing down speech around ${moments.length} moments`);
+    for (const [i, m] of moments.entries()) {
+      try {
+        m.speech = await transcribe(analysis, m.start, m.end, workDir);
+      } catch (e) { // one unreadable spot in the sound must not sink the whole job: that moment is skipped
+        m.speech = { words: [], sentences: [], music: false };
+        log(`speech ${i + 1}/${moments.length} at ${m.peak}s: skipped, could not write it down (${e.message})`);
+        continue;
+      }
+      log(`speech ${i + 1}/${moments.length} at ${m.peak}s: ${m.speech.words.length} words${m.speech.music ? " (music!)" : ""}${m.speech.note ? ` (${m.speech.note})` : ""}`);
+    }
+    const usable = moments.filter((m) => m.speech.words.length >= 8 && !m.speech.music); // music underneath = copyright claims
+    if (!usable.length) throw new Error("no moment with enough speech (and no music underneath) was found");
+    log(`step: the brain rates ${usable.length} moments${count === "auto" ? "" : ` and keeps up to ${count}`}`);
+    const { clips, note } = await pickClips(usable, { who, title, game, kind: tag === "podcast" ? "podcast" : "livestream", count: want,
+      minScore, long, core, ...(avoid ? { avoid } : {}), log });
+    // TikTok's long cut opens like the others and only runs on: if the written-down window ends too soon for that,
+    // write down the next 45 s too (only for the chosen clips).
+    const longLen = long || LENGTHS.long;
+    for (const [i, c] of clips.entries()) {
+      if (!platforms.some((p) => VERSIONS[p].span === "long") || c.long.end - c.long.start >= longLen[0] || c.until >= sound.duration - 1) continue;
+      log(`step: writing down what comes next, so clip ${i + 1} runs over ${longLen[0]} s on TikTok`);
+      const more = await transcribe(analysis, c.until, Math.min(sound.duration, c.until + 45), workDir)
+        .catch((e) => (log(`could not write down what comes next (${e.message}): clip ${i + 1} stays shorter`), { music: true }));
+      if (!more.music) clips[i] = lengthen(c, more, { long: longLen }); // music underneath: stay shorter, no claim
+    }
+    return { clips, note };
   }
 
   const outputs = [];
   let layout, clipCams = [];
   for (const [i, c] of clips.entries()) {
-    const video = await getVideo(c, i);
+    let video;
+    try {
+      video = await getVideo(c, i);
+    } catch (e) {
+      if (!e.skip) throw e;
+      log(`clip ${i + 1}: skipped, its video could not be downloaded (${e.message})`);
+      continue;
+    }
     const src = await probe(video.file);
     if (!src.hasVideo) throw new Error("no picture in this video");
     const faces = !cam && (!layout || layout.kind === "podcast")
@@ -197,13 +229,14 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
     }
     if (video.temp) fs.rmSync(video.file, { force: true });
   }
+  if (!outputs.length) throw new Error("no clip could be made: none of their videos could be downloaded");
   const result = {
     ok: true, who, title, layout: { kind: layout.kind, why: layout.why }, note,
     clips: clips.map((c, i) => ({ // best first: clip 1 = rank 1 = files 01-*.mp4
       clip: i + 1, rank: c.rank, score: c.score, by: c.by, hook: censor(c.hook), why: c.why, reasons: c.reasons, peak: c.peak,
       long: { start: c.long.start, end: c.long.end }, core: { start: c.core.start, end: c.core.end },
       caption: `${censor(c.caption)}${credit ? ` 🎥 ${credit}` : ""}${mustInclude ? `\n\n${mustInclude}` : ""}`,
-    })),
+    })).filter((c) => outputs.some((o) => o.clip === c.clip)), // a skipped clip has no files
     outputs,
   };
   fs.writeFileSync(path.join(outDir, "result.json"), JSON.stringify(result, null, 2));

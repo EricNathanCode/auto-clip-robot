@@ -81,4 +81,17 @@ function postJson(url, body, limitMs) {
 const round = (x, d = 2) => Math.round(x * 10 ** d) / 10 ** d;
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 
-module.exports = { TOOLS, run, probe, postJson, round, clamp };
+// Calls fn until it works: once, then again after each wait (in seconds). onRetry(error, wait) hears about each retry.
+async function retry(fn, waits, onRetry) {
+  for (let n = 0; ; n++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (n >= waits.length) throw e;
+      onRetry?.(e, waits[n]);
+      await new Promise((r) => setTimeout(r, waits[n] * 1000));
+    }
+  }
+}
+
+module.exports = { TOOLS, run, probe, postJson, retry, round, clamp };

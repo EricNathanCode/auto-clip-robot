@@ -6,7 +6,7 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 const { spawn } = require("child_process");
-const { TOOLS, run, probe } = require("./tools");
+const { TOOLS, run, probe, retry } = require("./tools");
 const { excitement, pickPeaks, loudness, STEP } = require("./moments");
 const { fromWhisper, transcribe } = require("./speech");
 const { fitSpan, pickClips, rank, compare, lengthen, prompt, plain, tidyHook, SCHEMA } = require("./brain");
@@ -157,6 +157,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(ranked.map((p) => `${p.rank}:${p.score}`).join(" ") === "1:9 2:8 3:8 4:6 5:4" && ranked[1].loud === 4,
     `ranked best first (a tie goes to the louder moment), none overlapping, AI scores under 6 dropped (${ranked.map((p) => p.score).join(", ")})`);
   check(rank([plan(9, 1, 0), plan(8, 1, 100), plan(7, 1, 200)], { count: 2, minScore: 6 }).length === 2, "never more clips than asked for");
+
+  let calls = 0;
+  const waited = [];
+  const third = await retry(async () => { if (++calls < 3) throw new Error("dropped"); return "ok"; }, [0, 0], (e, w) => waited.push(w));
+  const gaveUp = await retry(async () => { throw new Error("still down"); }, [0], () => {}).catch((e) => e.message);
+  check(third === "ok" && calls === 3 && waited.length === 2 && gaveUp === "still down",
+    "a download that fails is tried again (works the 3rd time), and gives up after the last try");
 
   console.log("\n--- LAYOUT FROM FACES (no tools) ---");
   const frame = (faces) => ({ width: 1920, height: 1080, samples: Array.from({ length: 20 }, (_, i) => ({ t: i * 0.5, faces })) });
@@ -327,6 +334,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     long: [20, 28], core: [10, 18], log: () => {} }).catch((e) => ({ error: e.message }));
   if (realWhisper === undefined) delete process.env.WHISPER; else process.env.WHISPER = realWhisper;
   check(/no moment with enough speech/.test(deaf.error || ""), `a moment that can't be written down is skipped, not the end of the job ("${deaf.error}")`);
+  const realFonts = process.env.FONTS_DIR, resumeOut = path.join(scratch, "resume"); // a job that fails late (here: no fonts)…
+  process.env.FONTS_DIR = path.join(scratch, "no-such-fonts");
+  const opts = { source: stream, outDir: resumeOut, platforms: ["reels"], count: 1, long: [20, 28], core: [10, 18] };
+  const late = await clipVideo({ ...opts, log: () => {} }).catch((e) => ({ error: e.message }));
+  if (realFonts === undefined) delete process.env.FONTS_DIR; else process.env.FONTS_DIR = realFonts;
+  const second = [];
+  const resumed = await clipVideo({ ...opts, log: (l) => second.push(l) }).catch((e) => ({ error: e.message }));
+  check(late.error && resumed.ok && resumed.outputs.length === 1 && second.some((l) => /reusing the speech and AI picks/.test(l)) &&
+    !second.some((l) => /writing down speech/.test(l)), "a job that failed late continues on the next run without redoing the speech and the AI");
   const pod = await clipVideo({ source: stream, outDir: path.join(scratch, "podcast"), platforms: ["reels"], count: 1,
     long: [20, 28], core: [10, 18], credit: "@pod", log: () => {} });
   delete process.env.FAKE_FACES;

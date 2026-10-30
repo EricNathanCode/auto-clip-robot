@@ -13,7 +13,7 @@ const PRESET = () => process.env.RENDER_PRESET || "veryfast"; // the Dell's CPU:
 // (Windows drive letters like C: break FFmpeg filter options).
 function prepareFonts(workDir) {
   const dest = path.join(workDir, "fonts");
-  if (!fs.existsSync(dest)) {
+  if (!fs.existsSync(dest) || !fs.readdirSync(dest).length) { // (an earlier run may have stopped before copying)
     fs.mkdirSync(dest, { recursive: true });
     for (const f of fs.readdirSync(TOOLS.fonts())) {
       if (/\.(ttf|otf)$/i.test(f)) fs.copyFileSync(path.join(TOOLS.fonts(), f), path.join(dest, f));
