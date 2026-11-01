@@ -12,7 +12,7 @@ const { fromWhisper, transcribe } = require("./speech");
 const { fitSpan, pickClips, rank, compare, lengthen, prompt, plain, tidyHook, SCHEMA } = require("./brain");
 const { decide, camBox, speakerTrack, cropXExpr, findFaces, shotCuts, webcamBorder, videoGraph } = require("./layout");
 const { chunks, buildAss, isBad, censor, LOOKS } = require("./captions");
-const { clipVideo, rateCount, fillCams } = require("./clip");
+const { clipVideo, rateCount, fillCams, scaleBox } = require("./clip");
 const { renderVersion } = require("./render");
 const download = require("./download");
 
@@ -70,6 +70,22 @@ function fakeOllama(answer) {
     });
   });
   server.asked = [];
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
+}
+
+// A tiny web server for the files in dir (with Range requests, so FFmpeg can jump into a video): a link that comes in
+// pieces, like Twitch (yt-dlp can't cut minutes out of a file:// link).
+function serveFiles(dir) {
+  const server = http.createServer((req, res) => {
+    const file = path.join(dir, path.basename(decodeURIComponent(req.url.split("?")[0])));
+    if (!fs.existsSync(file)) { res.writeHead(404); return res.end(); }
+    const size = fs.statSync(file).size, m = /bytes=(\d*)-(\d*)/.exec(req.headers.range || "");
+    const a = m && m[1] ? Number(m[1]) : 0, b = m && m[2] ? Number(m[2]) : size - 1;
+    res.writeHead(m ? 206 : 200, { "Content-Type": "video/mp4", "Accept-Ranges": "bytes", "Content-Length": b - a + 1,
+      ...(m ? { "Content-Range": `bytes ${a}-${b}/${size}` } : {}) });
+    if (req.method === "HEAD") return res.end();
+    fs.createReadStream(file, { start: a, end: b }).pipe(res);
+  });
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
 }
 
@@ -265,6 +281,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     { face: { x: 120, y: 160, w: 80, h: 90 }, box: camB }, { face: { x: 400, y: 500, w: 60, h: 70 }, box: null }]);
   check(filled[1] === camA && filled[2] === camB && filled[3] === null,
     "a clip whose webcam border wasn't clear borrows the box of a clip with the face in the same spot (or keeps the video's)");
+  const big = { width: 1920, height: 1080 };
+  const camUp = scaleBox({ x: 10, y: 15, w: 45, h: 33 }, 3, big), nearEdge = scaleBox({ x: 600, y: 300, w: 60, h: 80 }, 3, big);
+  check(JSON.stringify(camUp) === '{"x":30,"y":44,"w":134,"h":98}' && nearEdge.x + nearEdge.w <= 1920 && nearEdge.y + nearEdge.h <= 1080 && nearEdge.w % 2 === 0,
+    `a webcam box found on the small 640x360 copy is scaled to 1920x1080, even and inside the picture (${JSON.stringify(camUp)})`);
   const streamerOut = path.join(scratch, "streamer-layout.mp4"); // the pink box plays the webcam
   await ff("-t", "1", "-i", stream, "-filter_complex", videoGraph({ kind: "streamer", cam: { x: 1000, y: 40, w: 250, h: 170 } }, info).graph,
     "-map", "[vbase]", "-c:v", "libx264", "-preset", "ultrafast", streamerOut);
@@ -343,6 +363,23 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const resumed = await clipVideo({ ...opts, log: (l) => second.push(l) }).catch((e) => ({ error: e.message }));
   check(late.error && resumed.ok && resumed.outputs.length === 1 && second.some((l) => /reusing the speech and AI picks/.test(l)) &&
     !second.some((l) => /writing down speech/.test(l)), "a job that failed late continues on the next run without redoing the speech and the AI");
+  // A link that comes in pieces (like Twitch): every try of clip 1's download fails at first (DNS hiccups).
+  const realSection = download.section, tried = [], linkLog = [];
+  let failsLeft = 3;
+  download.section = async (...a) => { tried.push(a[5] || ""); if (failsLeft-- > 0) throw new Error("Temporary failure in name resolution"); return realSection(...a); };
+  process.env.DOWNLOAD_WAITS = "0,0,0";
+  const site = await serveFiles(scratch);
+  const pieces = await clipVideo({ source: `http://127.0.0.1:${site.address().port}/stream.mp4`, outDir: path.join(scratch, "pieces"),
+    platforms: ["reels"], count: 1, long: [20, 28], core: [10, 18], log: (l) => linkLog.push(l) }).catch((e) => ({ error: e.message }));
+  download.section = realSection;
+  site.close();
+  delete process.env.DOWNLOAD_WAITS;
+  check(pieces.outputs?.length === 1 && linkLog.some((l) => /skipped for now/.test(l)) && linkLog.some((l) => /second chance/.test(l)),
+    `a clip whose download keeps failing is skipped, then made on its second chance (${pieces.error || `${pieces.outputs.length} file`})`);
+  check(tried.length === 4 && /info\.json$/.test(tried[0]) && /info\.json$/.test(tried[1]) && tried[2] === "",
+    "clip downloads reuse the saved video info (fewer sites to look up), the last try asks the site afresh");
+  check(linkLog.some((l) => /small copy of the whole video/.test(l)) && linkLog.some((l) => /^layout: .*judged on the small copy/.test(l)),
+    "for a link that comes in pieces, the layout is judged on a small copy of the whole video");
   const pod = await clipVideo({ source: stream, outDir: path.join(scratch, "podcast"), platforms: ["reels"], count: 1,
     long: [20, 28], core: [10, 18], credit: "@pod", log: () => {} });
   delete process.env.FAKE_FACES;
@@ -405,11 +442,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   if ((await api(port, "GET", "/health")).json.ytdlp !== "missing") {
     await api(port, "POST", "/jobs/url1");
-    const u = await api(port, "POST", "/jobs/url1/start", { url: "file:///" + stream.replace(/\\/g, "/").replace(/^\//, ""), cam: { x: 1000, y: 40, w: 250, h: 170 },
+    const linkSite = await serveFiles(scratch);
+    const u = await api(port, "POST", "/jobs/url1/start", { url: `http://127.0.0.1:${linkSite.address().port}/stream.mp4`, cam: { x: 1000, y: 40, w: 250, h: 170 },
       platforms: ["shorts"], long: [20, 28], core: [10, 18], count: 1 });
     let us;
     const t1 = Date.now();
     do { await sleep(2000); us = (await api(port, "GET", "/jobs/url1/status")).json; } while (u.status === 202 && ["queued", "working"].includes(us.status) && Date.now() - t1 < 20 * 60 * 1000);
+    linkSite.close();
     check(us.status === "done" && us.result.outputs.length === 1, `a link works too: audio first, then the video (${us.status}${us.error ? `: ${us.error}` : ""})`);
   }
 

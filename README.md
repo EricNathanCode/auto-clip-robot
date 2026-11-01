@@ -17,7 +17,8 @@ link (YouTube / Twitch) or uploaded footage
                      it) and a caption; every moment scoring 7+ becomes a clip. A final round compares the clips side by side
                      and ranks them. Falls back to loudness if the AI is off.
                      Hooks must be true (no exaggeration about real people, no clickbait words), banned topics score 1, emojis are removed
-  → ⬇️ download.js  the picture in H.264 (YouTube: the whole video once, cut locally; elsewhere just the chosen minutes)
+  → ⬇️ download.js  the picture in H.264 (YouTube: the whole video once, cut locally; Twitch: just each clip's minutes,
+                     plus a small 360p copy of the whole stream to find the layout and the webcam's border on)
   → 🙂 layout.js    OpenCV YuNet finds faces: 🎮 streamer (the face that stays put near an edge = the webcam → cam on
                      top, the game below, cut at the webcam's border so the small cam is gone, on a blurred copy) · 🎙️ podcast (shot by shot: the crop jumps with every camera cut and, in a
                      wide shot, glides to whoever's mouth moves) · 🕹️ gameplay (blurred background).
@@ -57,10 +58,19 @@ time, and the big source file is deleted as soon as the clips are made.
 - whisper.cpp is compiled for the host's CPU during `docker build`.
 - yt-dlp updates itself daily (YouTube changes often).
 
+## Built for a flaky home network
+- Every download is retried (after 20 s and 60 s); a clip whose minutes still can't be downloaded is skipped and gets
+  a second chance at the end, instead of failing the job. A long stream is never downloaded whole (12 GB once filled the disk).
+- The video's info is saved once, so each clip's download only talks to the video servers (on Twitch, the info servers'
+  names were the ones that kept failing to look up).
+- The slow part (speech + AI picks) is saved: a job that fails later continues where it stopped when it's run again.
+- Whisper gets a time limit, and one retry without word timing if that mode crashes.
+- Give the container reliable DNS: `docker run … --dns 1.1.1.1 --dns 8.8.8.8 …` (a home router's DNS can drop lookups).
+
 ## Tests
-`node test.js <scratchDir>`: **91 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
-voice and two hype moments), a fake Ollama, fake faces for the podcast layout, the whole job API, and a file:// link
-through yt-dlp. On the Dell: `docker run --rm -v /opt/autoclip/test.js:/app/test.js autoclip node test.js /tmp/autoclip-test`
+`node test.js <scratchDir>`: **95 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
+voice and two hype moments), a fake Ollama, fake faces for the podcast layout, the whole job API, and links served
+by a tiny local web server (cut in pieces like Twitch, with failing downloads). On the Dell: `docker run --rm -v /opt/autoclip/test.js:/app/test.js autoclip node test.js /tmp/autoclip-test`
 
 ## Credits
 FFmpeg · [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (MIT) · [OpenCV YuNet](https://github.com/opencv/opencv_zoo) ·

@@ -25,8 +25,9 @@ const VERSIONS = {
   x: { span: "core", look: "pop", nudge: -0.3 },
 };
 const PLATFORMS = Object.keys(VERSIONS);
-const RETRY_WAITS = [20, 60]; // seconds before the 2nd and 3rd try of a download
-const WHOLE_MAX_MIN = 90; // a stream longer than this is never downloaded whole
+// Seconds to wait before a download's 2nd and 3rd try, and before the second chance for clips skipped over a failed
+// download (DOWNLOAD_WAITS="0,0,0" in tests).
+const WAITS = () => (process.env.DOWNLOAD_WAITS || "20,60,120").split(",").map(Number);
 const isUrl = (s) => /^(https?|file):\/\//i.test(s);
 
 // Faces (and camera cuts) for a stretch of a video file, or a stand-in for tests (FAKE_FACES = a JSON file shaped like
@@ -61,6 +62,12 @@ async function webcamPerClip(file, duration, clips, log) {
     return box;
   });
 }
+// A box found on the small copy, at the clip's size: scaled, even (FFmpeg crops), and inside the picture.
+const scaleBox = (b, s, { width, height }) => {
+  const ev = (v) => 2 * Math.floor(v / 2);
+  const x = Math.min(ev(b.x * s), width - 2), y = Math.min(ev(b.y * s), height - 2);
+  return { ...b, x, y, w: Math.max(2, Math.min(ev(b.w * s), ev(width - x))), h: Math.max(2, Math.min(ev(b.h * s), ev(height - y))) };
+};
 const fillCams = (found) => {
   const same = (a, b) => a && b && Math.abs(a.x - b.x) < a.w * 0.5 && Math.abs(a.y - b.y) < a.h * 0.5;
   return found.map((f) => f.box || found.find((o) => o.box && same(f.face, o.face))?.box || null);
@@ -83,38 +90,50 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   platforms = platforms.filter((p) => VERSIONS[p]);
   if (!platforms.length) throw new Error(`no known platform (use: ${PLATFORMS.join(", ")})`);
 
-  // Where the sound comes from, and how to get the picture for a chosen clip.
-  let analysis, getVideo, clues = [], game = "";
+  // Where the sound comes from, how to get the picture for a chosen clip, and (for a site cut in pieces) a small whole
+  // copy to find the layout on.
+  let analysis, getVideo, getSmall = async () => null, clues = [], game = "";
   if (isUrl(source)) {
     log("step: reading the video's info");
-    const meta = await download.info(source);
+    const meta = await download.info(source, workDir);
     if (meta.live) throw new Error("this stream is still live: it can be clipped after it ends");
     who = who || meta.who; title = title || meta.title; game = meta.game;
     clues = download.heatClues(meta.heatmap);
     log(`video: "${meta.title}" by ${meta.who}, ${round(meta.duration / 60, 1)} min${game ? `, game: ${game}` : ""}${clues.length ? `, ${clues.length} most-replayed peaks` : ""}`);
     log("step: downloading the audio only");
     analysis = await download.audioOnly(source, path.join(workDir, "audio"));
-    // A site sometimes drops a request (Twitch once did, after 4 hours of work): try again after a short wait.
+    // A site sometimes drops a request (Twitch did, again and again, on DNS hiccups): try again after a short wait. The
+    // first two tries use the saved info (fewer sites to look up), the last one asks the site afresh.
     const again = (e, wait) => log(`step: the download failed (${e.message}): trying again in ${wait} s`);
+    const tries = (get) => { let n = 0; return retry(() => get(n++ < 2 ? meta.infoFile : ""), WAITS().slice(0, 2), again); };
+    const videoDir = path.join(workDir, "video");
     getVideo = async (c, i) => {
       if (download.isYouTube(source)) { // cutting YouTube online is unreliable: one whole download, cut locally
         log(i === 0 ? "step: downloading the video once (H.264, max 1080p)" : `step: reusing the downloaded video for clip ${i + 1}`);
-        return { file: await retry(() => download.full(source, path.join(workDir, "video")), RETRY_WAITS, again), offset: 0 };
+        return { file: await retry(() => download.full(source, videoDir), WAITS().slice(0, 2), again), offset: 0 };
       }
+      // Never the whole stream here: at 1080p60 one of 3 h 51 is 12 GB (and fixing it up needs as much again), which
+      // once filled the disk. A clip whose minutes still can't be downloaded is skipped (and gets a second chance).
       const from = Math.max(0, c.long.start - 2);
       log(`step: downloading ${round(c.long.end + 2 - from)} s of video for clip ${i + 1}`);
       try {
-        const file = await retry(() => download.section(source, from, c.long.end + 2, path.join(workDir, "video"), `clip${i + 1}`),
-          RETRY_WAITS, again);
-        return { file, offset: from, temp: true };
+        return { file: await tries((info) => download.section(source, from, c.long.end + 2, videoDir, `clip${i + 1}`, info)), offset: from, temp: true };
       } catch (e) {
-        // The whole of a long stream is many GB (3 h 51 at 1080p60 = 12 GB, and fixing it up needs as much again):
-        // skip this clip instead. A shorter video is downloaded whole once.
-        if (meta.duration > WHOLE_MAX_MIN * 60) throw Object.assign(e, { skip: true });
-        log(`step: downloading just these minutes failed (${e.message}): downloading the whole video once`);
-        return { file: await download.full(source, path.join(workDir, "video")), offset: 0 };
+        throw Object.assign(e, { skip: true });
       }
     };
+    if (!download.isYouTube(source)) {
+      getSmall = async () => {
+        log("step: downloading a small copy of the whole video (max 360p), to find the layout and the webcam's border");
+        try {
+          const file = await tries((info) => download.small(source, videoDir, info));
+          return { file, ...(await probe(file)) };
+        } catch (e) {
+          log(`step: the small copy failed (${e.message}): the layout is judged on the first clip`);
+          return null;
+        }
+      };
+    }
   } else {
     analysis = source;
     getVideo = async () => ({ file: source, offset: 0 });
@@ -181,34 +200,41 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
 
   const outputs = [];
   let layout, clipCams = [];
-  for (const [i, c] of clips.entries()) {
+  const small = cam ? null : await getSmall();
+  // Makes one clip's versions; false = skipped, its video couldn't be downloaded.
+  const makeClip = async (c, i) => {
     let video;
     try {
       video = await getVideo(c, i);
     } catch (e) {
       if (!e.skip) throw e;
-      log(`clip ${i + 1}: skipped, its video could not be downloaded (${e.message})`);
-      continue;
+      log(`clip ${i + 1}: skipped for now, its video could not be downloaded (${e.message})`);
+      return false;
     }
     const src = await probe(video.file);
     if (!src.hasVideo) throw new Error("no picture in this video");
     const faces = !cam && (!layout || layout.kind === "podcast")
       ? await facesFor(video.file, c.long.start - video.offset, c.long.end - video.offset) : null;
     if (!layout) { // decided once, on the first clip
-      // With the whole video on disk, judge from 90 looks spread across all of it: a webcam stays in its spot the
-      // whole stream, while game characters come and go (one standing still during a clip once fooled it).
-      const wholeVideo = video.offset === 0 && src.duration > 3 * (c.long.end - c.long.start);
-      const whole = !cam && tag !== "podcast" && wholeVideo
-        ? await facesFor(video.file, 0, src.duration, src.duration / 90, { cuts: false }) : faces;
-      layout = cam ? { kind: "streamer", cam, why: "cam box given" } : decide(whole, tag === "auto" ? null : tag);
-      if (layout.face && wholeVideo && !process.env.FAKE_FACES) { // fit the cam to the webcam box's real border
-        const border = await webcamBorder(video.file, 0, src.duration, layout.face);
+      // With a whole video on disk (YouTube's, or a site's small copy), judge from 90 looks spread across all of it: a
+      // webcam stays in its spot the whole stream, while game characters come and go (one standing still during a clip
+      // once fooled it). What's found on the small copy is scaled up to the clip's size.
+      const look = small ? { file: small.file, duration: small.duration, scale: src.width / small.width }
+        : video.offset === 0 && src.duration > 3 * (c.long.end - c.long.start) ? { file: video.file, duration: src.duration, scale: 1 } : null;
+      const whole = !cam && tag !== "podcast" && look
+        ? await facesFor(look.file, 0, look.duration, look.duration / 90, { cuts: false }) : null;
+      layout = cam ? { kind: "streamer", cam, why: "cam box given" } : decide(whole || faces, tag === "auto" ? null : tag);
+      if (layout.face && whole && !process.env.FAKE_FACES) { // fit the cam to the webcam box's real border
+        const border = await webcamBorder(look.file, 0, look.duration, layout.face);
         if (border) layout = { ...layout, cam: border, why: `${layout.why}, webcam border found` };
-        log(`layout: ${layout.kind} (${layout.why})`);
-        if (layout.kind === "streamer") clipCams = await webcamPerClip(video.file, src.duration, clips, log);
-      } else {
-        log(`layout: ${layout.kind} (${layout.why})`);
+        if (layout.kind === "streamer") clipCams = await webcamPerClip(look.file, look.duration, clips, log);
       }
+      if (whole && look.scale !== 1) {
+        const up = (b) => b && scaleBox(b, look.scale, src);
+        layout = { ...layout, cam: up(layout.cam), face: up(layout.face) };
+        clipCams = clipCams.map(up);
+      }
+      log(`layout: ${layout.kind} (${layout.why})${whole && small ? ", judged on the small copy" : ""}`);
     }
     const clipLayout = clipCams[i] ? { ...layout, cam: clipCams[i] } : layout;
     for (const p of platforms) {
@@ -228,6 +254,16 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
       outputs.push({ clip: i + 1, platform: p, file: `${name}.mp4`, seconds: r.seconds, renderSeconds: r.renderSeconds });
     }
     if (video.temp) fs.rmSync(video.file, { force: true });
+    return true;
+  };
+  const skipped = [];
+  for (const [i, c] of clips.entries()) if (!(await makeClip(c, i))) skipped.push(i);
+  if (skipped.length) { // the second chance: a site's (or DNS) hiccup is often over a few minutes later
+    const wait = WAITS()[2];
+    log(`step: ${skipped.length} skipped clip${skipped.length > 1 ? "s get" : " gets"} a second chance in ${wait} s`);
+    await new Promise((r) => setTimeout(r, wait * 1000));
+    for (const i of skipped) if (!(await makeClip(clips[i], i))) log(`clip ${i + 1}: skipped for good`);
+    outputs.sort((a, b) => a.clip - b.clip);
   }
   if (!outputs.length) throw new Error("no clip could be made: none of their videos could be downloaded");
   const result = {
@@ -244,7 +280,7 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   return result;
 }
 
-module.exports = { clipVideo, rateCount, fillCams, VERSIONS, PLATFORMS };
+module.exports = { clipVideo, rateCount, fillCams, scaleBox, VERSIONS, PLATFORMS };
 
 if (require.main === module) {
   const [source, outDir, ...rest] = process.argv.slice(2);
