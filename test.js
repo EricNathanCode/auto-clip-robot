@@ -194,6 +194,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const sideGuest = decide(frame([{ x: 150, y: 330, w: 180, h: 250, score: 0.9, mouth: 0.1 }])); // same size, mid-height
   check(greenScreen.kind === "podcast" && greenScreen.maybeCam?.corner === true && sideGuest.maybeCam?.corner === false,
     "a big face that stays in a bottom corner may be a big facecam (checked for a frame, else a green screen); at mid-height it stays a podcast");
+  const hug = greenScreen.maybeCam.cam, hugTop = videoGraph({ kind: "streamer", cam: hug, frameless: true }, { width: 1920, height: 1080 }).graph;
+  check(hug.x === 0 && hug.w <= 3 * 180 && hug.x + hug.w >= 150 + 180 && hug.y >= 680 - 0.2 * 250 && hug.y + hug.h <= 1080 &&
+    hugTop.includes(`crop=${hug.w}:${hug.h}:${hug.x}:${hug.y},scale=1080:`),
+    `a green-screen cam box hugs the person (shoulder to shoulder, from just above the face), not half the game (${JSON.stringify(hug)})`);
   const two = { width: 1920, height: 1080, samples: [] };
   for (let t = 0; t < 20; t += 0.5) two.samples.push({ t, faces: [{ x: 300, y: 200, w: 300, h: 380, mouth: t < 10 ? 0.12 : 0.01 }, { x: 1300, y: 200, w: 300, h: 380, mouth: t < 10 ? 0.01 : 0.15 }] });
   const keys = speakerTrack(two, [{ t0: 1, t1: 8 }, { t0: 11, t1: 18 }], 0);

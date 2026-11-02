@@ -7,7 +7,7 @@
 const path = require("path");
 const { TOOLS, run, round, clamp } = require("./tools");
 
-const W = 1080, H = 1920;
+const W = 1080, H = 1920, TOP_MAX = 800; // TOP_MAX: the tallest the streamer's cam gets on top
 const even = (x) => Math.round(x / 2) * 2;
 
 // Faces between start and end of a video file, plus its camera cuts; all times in seconds from `start`.
@@ -54,7 +54,7 @@ function spots(samples, sw, sh) {
 // The guess. Returns { kind, cam?, why, maybeCam? }. maybeCam: a face that stays in one side spot but is too big for a
 // usual webcam (one streamer's: 23% of the height). clip.js decides: a webcam frame around it (webcamBorder) → streamer;
 // no frame but in a top or bottom corner → still a streamer (a green-screen cutout: the person is keyed
-// straight onto the game, so there is no frame to find), with a box grown from the face; otherwise a podcast (a podcast
+// straight onto the game, so there is no frame to find), with a box hugging the person; otherwise a podcast (a podcast
 // guest sits at mid-height and has no frame).
 function decide(found, override) {
   const { width: sw, height: sh, samples } = found;
@@ -75,7 +75,7 @@ function decide(found, override) {
   const hRatio = median(withFace.map((s) => Math.max(...s.faces.map((f) => f.h)) / sh));
   const big = groups.find((g) => g.faces.length / n >= 0.2 && median(g.faces.map((f) => f.h)) / sh < 0.4 && edge(g));
   return { kind: "podcast", why: `big faces (${Math.round(hRatio * 100)}% of the height)`,
-    ...(big ? { maybeCam: { face: middleFace(big.faces), cam: camBox(big.faces, sw, sh), corner: big.cy < 0.3 || big.cy > 0.6,
+    ...(big ? { maybeCam: { face: middleFace(big.faces), cam: personBox(big.faces, sw, sh), corner: big.cy < 0.3 || big.cy > 0.6,
       why: `a big webcam face near the ${edge(big)} edge` } } : {}) };
 }
 
@@ -101,6 +101,17 @@ function camBox(faces, sw, sh) {
   if (w / h < 4 / 3) w = h * (4 / 3);
   w = Math.min(w, sw); h = Math.min(h, sh);
   const x = clamp(fcx - w / 2, 0, sw - w), y = clamp(fcy - h * 0.42, 0, sh - h);
+  return { x: even(x), y: even(y), w: even(w), h: even(h) };
+}
+
+// A green-screen cutout has no frame, and the game shows all around the person: the box hugs them instead, shoulder to
+// shoulder (2.8 face widths) and from just above the face down the chest, as tall as the top allows. A box grown like a
+// webcam's showed about half game (one streamer's own cam layer even cut the head off flat, just above the face).
+function personBox(faces, sw, sh) {
+  const m = (k) => median(faces.map((f) => f[k]));
+  const fw = m("w"), fh = m("h"), w = Math.min(sw, fw * 2.8);
+  const x = clamp(m("x") + fw / 2 - w / 2, 0, sw - w), y = clamp(m("y") - fh * 0.1, 0, sh - 2);
+  const h = Math.min(sh - y, w * TOP_MAX / W);
   return { x: even(x), y: even(y), w: even(w), h: even(h) };
 }
 
@@ -184,7 +195,7 @@ function videoGraph(layout, src, extra = {}) {
   if (layout.kind === "streamer") {
     // The cam fills the full width on top. A very wide or tall cam is trimmed (from its middle) to fit, never stretched.
     let cam = layout.cam;
-    const topH = even(clamp(W * cam.h / cam.w, 540, 800)), botH = H - topH;
+    const topH = even(clamp(W * cam.h / cam.w, 540, TOP_MAX)), botH = H - topH;
     if (cam.w / cam.h > W / topH) { const w = even(cam.h * W / topH); cam = { ...cam, x: even(cam.x + (cam.w - w) / 2), w }; }
     else if (cam.w / cam.h < W / topH) { const h = even(cam.w * topH / W); cam = { ...cam, y: even(cam.y + (cam.h - h) / 2), h }; }
     // Below it, the WHOLE game, so action on the left or right is never cut off (D032), on a blurred copy of itself; the
