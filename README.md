@@ -23,7 +23,9 @@ link (YouTube / Twitch) or uploaded footage
                      top, the game below, cut at the webcam's border so the small cam is gone, on a blurred copy) · 🎙️ podcast (shot by shot: the crop jumps with every camera cut and, in a
                      wide shot, glides to whoever's mouth moves) · 🕹️ gameplay (blurred background).
                      webcam.py fits the cam to the webcam box's exact border (a sharp line in every frame while the
-                     game behind it keeps changing)
+                     game behind it keeps changing). A big facecam (face over 22% of the height) counts as a webcam if it has
+                     such a frame, or sits in a corner with none (a green-screen cutout: the game is then kept whole, as
+                     streamed); a big cam keeps the whole game centered instead of cutting a third of it away
   → 🎬 render.js    FFmpeg: layout + ASS captions (Fredoka) + hook + credit, bad words beeped (and ***** on screen),
                      loudness to -14 LUFS, H.264 MP4
 ```
@@ -68,7 +70,7 @@ time, and the big source file is deleted as soon as the clips are made.
 - Give the container reliable DNS: `docker run … --dns 1.1.1.1 --dns 8.8.8.8 …` (a home router's DNS can drop lookups).
 
 ## Tests
-`node test.js <scratchDir>`: **95 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
+`node test.js <scratchDir>`: **98 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
 voice and two hype moments), a fake Ollama, fake faces for the podcast layout, the whole job API, and links served
 by a tiny local web server (cut in pieces like Twitch, with failing downloads). On the Dell: `docker run --rm -v /opt/autoclip/test.js:/app/test.js autoclip node test.js /tmp/autoclip-test`
 

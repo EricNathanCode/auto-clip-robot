@@ -224,10 +224,22 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
       const whole = !cam && tag !== "podcast" && look
         ? await facesFor(look.file, 0, look.duration, look.duration / 90, { cuts: false }) : null;
       layout = cam ? { kind: "streamer", cam, why: "cam box given" } : decide(whole || faces, tag === "auto" ? null : tag);
-      if (layout.face && whole && !process.env.FAKE_FACES) { // fit the cam to the webcam box's real border
+      if (layout.maybeCam && whole && !process.env.FAKE_FACES) { // a big face in a side spot: a webcam only with a webcam's frame
+        const { maybeCam, ...podcast } = layout;
+        const border = await webcamBorder(look.file, 0, look.duration, maybeCam.face);
+        layout = border ? { kind: "streamer", cam: border, face: maybeCam.face, why: `${maybeCam.why}, webcam border found` }
+          : maybeCam.corner ? { kind: "streamer", cam: maybeCam.cam, face: maybeCam.face, frameless: true,
+            why: `${maybeCam.why}, in a corner with no frame (a green-screen cutout)` }
+          : { ...podcast, why: `${podcast.why}; the big face near the edge has no webcam frame` };
+        if (border) clipCams = await webcamPerClip(look.file, look.duration, clips, log);
+      } else if (layout.face && whole && !process.env.FAKE_FACES) { // fit the cam to the webcam box's real border
         const border = await webcamBorder(look.file, 0, look.duration, layout.face);
-        if (border) layout = { ...layout, cam: border, why: `${layout.why}, webcam border found` };
+        // No frame found: the cam box is only grown from the face, so the game isn't cut or blurred at it (see layout.js).
+        layout = border ? { ...layout, cam: border, why: `${layout.why}, webcam border found` }
+          : { ...layout, frameless: true, why: `${layout.why}, no webcam frame found` };
         if (layout.kind === "streamer") clipCams = await webcamPerClip(look.file, look.duration, clips, log);
+      } else if (layout.kind === "streamer" && !cam && !whole) {
+        layout = { ...layout, frameless: true }; // judged on one clip only: the cam box is a guess
       }
       if (whole && look.scale !== 1) {
         const up = (b) => b && scaleBox(b, look.scale, src);
@@ -236,7 +248,7 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
       }
       log(`layout: ${layout.kind} (${layout.why})${whole && small ? ", judged on the small copy" : ""}`);
     }
-    const clipLayout = clipCams[i] ? { ...layout, cam: clipCams[i] } : layout;
+    const clipLayout = clipCams[i] ? { ...layout, cam: clipCams[i], frameless: false } : layout; // a frame found around this clip
     for (const p of platforms) {
       const v = VERSIONS[p], span = c[v.span];
       const start = round(clamp(span.start + v.nudge, video.offset, span.end - 5)), end = span.end;

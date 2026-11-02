@@ -51,7 +51,11 @@ function spots(samples, sw, sh) {
   return groups.sort((a, b) => b.faces.length - a.faces.length);
 }
 
-// The guess. Returns { kind, cam?, why }.
+// The guess. Returns { kind, cam?, why, maybeCam? }. maybeCam: a face that stays in one side spot but is too big for a
+// usual webcam (one streamer's: 23% of the height). clip.js decides: a webcam frame around it (webcamBorder) → streamer;
+// no frame but in a top or bottom corner → still a streamer (a green-screen cutout: the person is keyed
+// straight onto the game, so there is no frame to find), with a box grown from the face; otherwise a podcast (a podcast
+// guest sits at mid-height and has no frame).
 function decide(found, override) {
   const { width: sw, height: sh, samples } = found;
   if (override === "podcast") return { kind: "podcast", why: "tagged podcast" };
@@ -69,7 +73,10 @@ function decide(found, override) {
   }
   if (share < 0.3) return { kind: "gameplay", why: `a face in only ${Math.round(share * 100)}% of frames` };
   const hRatio = median(withFace.map((s) => Math.max(...s.faces.map((f) => f.h)) / sh));
-  return { kind: "podcast", why: `big faces (${Math.round(hRatio * 100)}% of the height)` };
+  const big = groups.find((g) => g.faces.length / n >= 0.2 && median(g.faces.map((f) => f.h)) / sh < 0.4 && edge(g));
+  return { kind: "podcast", why: `big faces (${Math.round(hRatio * 100)}% of the height)`,
+    ...(big ? { maybeCam: { face: middleFace(big.faces), cam: camBox(big.faces, sw, sh), corner: big.cy < 0.3 || big.cy > 0.6,
+      why: `a big webcam face near the ${edge(big)} edge` } } : {}) };
 }
 
 const middleFace = (faces) => Object.fromEntries(["x", "y", "w", "h"].map((k) => [k, median(faces.map((f) => f[k]))]));
@@ -183,16 +190,20 @@ function videoGraph(layout, src, extra = {}) {
     // Below it, the WHOLE game, so action on the left or right is never cut off (D032), on a blurred copy of itself; the
     // captions sit in the blurred band between the cam and the game. The game picture starts at the webcam's border
     // (D033): a cam on the left → from its right edge to the right side of the screen; on the right → the opposite. So
-    // the small webcam is gone from the game, and the game shows bigger. If that would leave too little game (a very
-    // wide cam), the full width is kept and the small webcam is blurred out instead.
+    // the small webcam is gone from the game, and the game shows bigger. A big cam (one was about a third of the width)
+    // would take too much game away and push the middle of the game (the crosshair) off-center: when the cut would
+    // keep less than 3/4 of the width, the full width is kept and the webcam is blurred out instead.
     // The cut is 1.5% of the width past the border: the border is found a hair inside the webcam (good for the top),
     // which left a sliver of the webcam's frame in the game picture.
     const c = layout.cam, onLeft = c.x + c.w / 2 < sw / 2, m = even(sw * 0.015);
     const gx = onLeft ? even(c.x + c.w + m) : 0, gw = even(onLeft ? sw - gx : c.x - m);
-    const cut = gw >= Math.max(sw / 2, W * sh / botH);
+    // A green-screen cutout has no frame: its box is only a guess, so the game is never cut at it, and the person stays
+    // in the game as streamed (a big blurred box over the game looked worse).
+    const cut = !layout.frameless && gw >= Math.max(sw * 0.75, W * sh / botH);
     const gh = even(Math.min(botH, W * sh / (cut ? gw : sw))), gy = even((botH - gh) / 2);
     const r = Math.max(1, Math.min(20, Math.floor(Math.min(c.w, c.h) / 4) - 1));
     const game = cut ? `[game]crop=${gw}:${sh}:${gx}:0,` // the strip with the webcam is left out
+      : layout.frameless ? "[game]"
       : `[game]split=2[g][gc];[gc]crop=${c.w}:${c.h}:${c.x}:${c.y},boxblur=${r}:3[gcb];[g][gcb]overlay=${c.x}:${c.y},`;
     const bh = even(270 * botH / W);
     return {

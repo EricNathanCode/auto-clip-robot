@@ -190,6 +190,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(decide(frame([{ x: 700, y: 200, w: 400, h: 500, score: 0.9, mouth: 0.1 }])).kind === "podcast", "a big face = podcast");
   check(decide(frame([])).kind === "gameplay", "no face = gameplay on a blurred background");
   check(decide(frame([{ x: 700, y: 200, w: 400, h: 500, score: 0.9, mouth: 0.1 }]), "streamer").kind === "streamer", "a streamer tag wins over the guess");
+  const greenScreen = decide(frame([{ x: 150, y: 680, w: 180, h: 250, score: 0.9, mouth: 0.1 }])); // 23% tall, bottom-left
+  const sideGuest = decide(frame([{ x: 150, y: 330, w: 180, h: 250, score: 0.9, mouth: 0.1 }])); // same size, mid-height
+  check(greenScreen.kind === "podcast" && greenScreen.maybeCam?.corner === true && sideGuest.maybeCam?.corner === false,
+    "a big face that stays in a bottom corner may be a big facecam (checked for a frame, else a green screen); at mid-height it stays a podcast");
   const two = { width: 1920, height: 1080, samples: [] };
   for (let t = 0; t < 20; t += 0.5) two.samples.push({ t, faces: [{ x: 300, y: 200, w: 300, h: 380, mouth: t < 10 ? 0.12 : 0.01 }, { x: 1300, y: 200, w: 300, h: 380, mouth: t < 10 ? 0.01 : 0.15 }] });
   const keys = speakerTrack(two, [{ t0: 1, t1: 8 }, { t0: 11, t1: 18 }], 0);
@@ -219,6 +223,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const bigCam = videoGraph({ kind: "streamer", cam: { x: 0, y: 0, w: 1000, h: 700 } }, hd).graph;
   check(bigCam.includes("scale=1080:608") && bigCam.includes("[gc]crop=1000:700:0:0,boxblur"),
     "a very wide cam would leave too little game: full width instead, small webcam blurred out");
+  const thirdCam = videoGraph({ kind: "streamer", cam: { x: 0, y: 620, w: 560, h: 420 } }, hd).graph;
+  check(!thirdCam.includes("[game]crop=") && thirdCam.includes("[gc]crop=560:420:0:620,boxblur"),
+    "a big framed cam (a third of the width) keeps the whole game centered, the cam blurred, instead of cutting a third away");
+  const frameless = videoGraph({ kind: "streamer", cam: { x: 0, y: 486, w: 792, h: 594 }, frameless: true }, hd).graph;
+  check(frameless.includes("[game]scale=1080:608") && !frameless.includes("[gc]") && !frameless.includes("[game]crop="),
+    "a green-screen cam (no frame): the whole game as streamed, nothing cut or blurred at the guessed box");
   const wide = videoGraph({ kind: "streamer", cam: { x: 0, y: 0, w: 800, h: 200 } }, { width: 1920, height: 1080 });
   check(wide.graph.includes("crop=400:200:200:0,scale=1080:540"), "a very wide webcam is trimmed to fit the top, never stretched");
   const cutExpr = cropXExpr(cutKeys, 608, 1920);
@@ -296,7 +306,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const shots = await shotCuts(twoShots, 1, 6);
   check(shots.length === 1 && near(shots[0], 2, 0.05), `finds the camera cut, timed from the clip's start (${shots.join(", ")} s)`);
   const overlay = path.join(scratch, "webcam-overlay.mp4"); // ever-changing "gameplay" with a still webcam box top-left
-  await ff("-f", "lavfi", "-i", "gradients=s=640x360:speed=0.08:n=4:rate=25", "-t", "12",
+  await ff("-f", "lavfi", "-i", "gradients=s=640x360:speed=0.08:n=4:rate=25:seed=1", "-t", "12",
     "-vf", "drawbox=x=0:y=40:w=200:h=120:color=0x403530:t=fill", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", overlay);
   const border = await webcamBorder(overlay, 0, 12, { x: 70, y: 70, w: 40, h: 50 });
   check(border && near(border.x, 0, 6) && near(border.y, 40, 6) && near(border.w, 200, 8) && near(border.h, 120, 8),
