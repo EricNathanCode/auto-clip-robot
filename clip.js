@@ -2,18 +2,21 @@
 // limit, ranked 01 = best), each in a version per platform.
 //   (download.js: audio first) → moments.js (loud spikes) → speech.js (words) → brain.js (AI scores, ranks + hook)
 //   → (download.js: the picture) → layout.js (faces, webcam) → render.js (MP4s)
+// Compilation mode (D040): one short bit (setup → punchline) per moment instead; the best bits are joined into ONE video
+// per platform (compilation-<platform>.mp4), best bit first, quick fades between bits, one AI title on top the whole time.
 // CLI: node clip.js <video file or URL> <outDir> [--layout auto|streamer|podcast] [--cam x,y,w,h] [--credit @name]
 //      [--who Name] [--title "…"] [--platforms tiktok,shorts,reels,x] [--long 61-70] [--core 30-60] [--count auto|1-30]
 //      [--min-score 7] [--must "#ad · text the campaign requires"] [--avoid "topics the campaign bans"] [--candidates 4-30]
+//      [--mode clips|compilation] [--captions on|off] [--bit 5-15]
 const fs = require("fs");
 const path = require("path");
 const { probe, retry, round, clamp } = require("./tools");
 const { findMoments } = require("./moments");
 const { transcribe } = require("./speech");
-const { pickClips, lengthen, LENGTHS } = require("./brain");
+const { pickClips, lengthen, LENGTHS, pickBits, arrange, nameCompilation, COMPILE } = require("./brain");
 const { censor } = require("./captions");
 const { findFaces, decide, speakerTrack, webcamBorder } = require("./layout");
-const { renderVersion } = require("./render");
+const { renderVersion, joinPieces } = require("./render");
 const download = require("./download");
 
 // One version per platform (D026): TikTok gets the long cut (over 1 minute), the others the core, each with its own
@@ -82,9 +85,16 @@ const rateCount = (seconds) => clamp(Math.ceil(seconds / 120), 4, 30);
 // so a dull video gives fewer clips. Clips come out ranked: 01 = best.
 // mustInclude: text a campaign requires in every post description (e.g. "#ad" + a line about the show).
 // avoid: topics this campaign bans (replaces the default list in brain.js).
+// mode: "clips" or "compilation" (then long/core are the whole compilation's lengths, default 61-90 s for TikTok and
+// 30-60 s for the others; bit = one bit's length; minScore defaults to 5: a compilation needs several bits). captions:
+// word-by-word captions (default: on for clips, off for a compilation, which shows only its title).
 async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, credit = "", who = "", title = "",
-  platforms = ["tiktok", "shorts", "reels"], long, core, count = "auto", candidates, minScore = 7, mustInclude = "", avoid,
-  log = console.log }) {
+  platforms = ["tiktok", "shorts", "reels"], long, core, count = "auto", candidates, minScore, mustInclude = "", avoid,
+  mode = "clips", captions, bit, log = console.log }) {
+  if (!["clips", "compilation"].includes(mode)) throw new Error(`unknown mode "${mode}" (use: clips, compilation)`);
+  const compilation = mode === "compilation";
+  minScore = minScore ?? (compilation ? 5 : 7);
+  captions = captions ?? !compilation;
   fs.mkdirSync(outDir, { recursive: true });
   workDir = workDir || path.join(outDir, ".work");
   platforms = platforms.filter((p) => VERSIONS[p]);
@@ -141,32 +151,41 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
   const sound = await probe(analysis);
   if (!sound.hasAudio) throw new Error("no sound in this video: nothing to listen to or write down");
   const want = count === "auto" ? Infinity : count;
-  const rate = candidates || (count === "auto" ? rateCount(sound.duration) : clamp(Math.ceil(count * 1.5), 4, 30));
-  log(`source: ${round(sound.duration / 60, 1)} min → the AI rates ${rate} moments; ${count === "auto" ? "every one" : `the best ${count}`} scoring ${minScore}+ becomes a clip`);
+  const rate = candidates || (count === "auto" || compilation ? rateCount(sound.duration) : clamp(Math.ceil(count * 1.5), 4, 30));
+  const sizes = { long: long || COMPILE.long, core: core || COMPILE.core }; // a compilation's lengths
+  log(compilation
+    ? `source: ${round(sound.duration / 60, 1)} min → the AI looks for a short bit in ${rate} moments; the best (scoring ${minScore}+) make one compilation`
+    : `source: ${round(sound.duration / 60, 1)} min → the AI rates ${rate} moments; ${count === "auto" ? "every one" : `the best ${count}`} scoring ${minScore}+ becomes a clip`);
 
   // The slow part (speech + the AI: hours for a long stream) is saved, so a job that fails later (a download hiccup, a
   // full disk) continues from here when it's run again with the same settings.
   const saved = path.join(workDir, "plans.json");
-  const key = JSON.stringify({ source: String(source), tag, who, title, platforms, long, core, count, candidates, minScore, avoid });
+  const key = JSON.stringify({ source: String(source), tag, who, title, platforms, long, core, count, candidates, minScore, avoid,
+    ...(compilation ? { mode, bit } : {}) });
   const before = (() => { try { return JSON.parse(fs.readFileSync(saved, "utf8")); } catch { return null; } })();
-  let clips, note;
+  // clips: the clips, or a compilation's bits. comp (compilation mode): { sets: { long, core: bit numbers in playing
+  // order }, title, caption }.
+  let clips, note, comp;
   if (before?.key === key) {
-    ({ clips, note } = before);
-    log(`step: reusing the speech and AI picks saved by an earlier run (${clips.length} clips)`);
+    ({ clips, note, comp } = before);
+    log(`step: reusing the speech and AI picks saved by an earlier run (${clips.length} ${compilation ? "bits" : "clips"})`);
   } else {
-    ({ clips, note } = await planClips());
+    ({ clips, note, comp } = compilation ? await planCompilation() : await planClips());
     if (!clips.length) { // nothing good enough: a finished job with no clips (and why), not an error
-      log(`result: no clips (${note})`);
-      const result = { ok: true, who, title, layout: null, note, clips: [], outputs: [] };
+      log(`result: no ${compilation ? "compilation" : "clips"} (${note})`);
+      const result = { ok: true, ...(compilation ? { mode } : {}), who, title, layout: null, note, clips: [], outputs: [] };
       fs.writeFileSync(path.join(outDir, "result.json"), JSON.stringify(result, null, 2));
       fs.rmSync(workDir, { recursive: true, force: true });
       return result;
     }
-    fs.writeFileSync(saved, JSON.stringify({ key, clips, note }));
+    fs.writeFileSync(saved, JSON.stringify({ key, clips, note, comp }));
   }
-  log(`ranked: ${clips.map((c) => `#${c.rank} score ${c.score} "${c.hook}"`).join(" · ")}`);
+  log(compilation
+    ? `compilation "${comp.title}": ${clips.map((c, i) => `bit ${i + 1} score ${c.score} (${round(c.core.end - c.core.start, 1)} s)`).join(" · ")}`
+    : `ranked: ${clips.map((c) => `#${c.rank} score ${c.score} "${c.hook}"`).join(" · ")}`);
 
-  async function planClips() {
+  // Finds the moments and writes down what's said around them; returns the ones worth showing the brain.
+  async function listen() {
     log("step: finding loud moments");
     const moments = await findMoments(analysis, sound.duration, { count: rate, extras: clues });
     log(`step: writing down speech around ${moments.length} moments`);
@@ -182,6 +201,31 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
     }
     const usable = moments.filter((m) => m.speech.words.length >= 8 && !m.speech.music); // music underneath = copyright claims
     if (!usable.length) throw new Error("no moment with enough speech (and no music underneath) was found");
+    return usable;
+  }
+
+  // A compilation: a bit per moment, then the bits for TikTok's long version and for the others' shorter one (the
+  // shorter one keeps the very best), and one title for them.
+  async function planCompilation() {
+    const usable = await listen();
+    log(`step: the brain looks for a short bit in ${usable.length} moments`);
+    const ctx = { who, title, game, kind: tag === "podcast" ? "podcast" : "livestream", ...(bit ? { bit } : {}), ...(avoid ? { avoid } : {}), log };
+    const { bits, note } = await pickBits(usable, ctx);
+    const sets = { long: arrange(bits, sizes.long, minScore), core: arrange(bits, sizes.core, minScore) };
+    const chosen = [...new Set([...sets.long, ...sets.core])];
+    if (!chosen.length) return { clips: [], note: [note, `no bit scored ${minScore} or more`].filter(Boolean).join("; ") };
+    const named = await nameCompilation(sets.long.length ? sets.long : sets.core, ctx);
+    const short = (set, [lo]) => {
+      const total = set.reduce((s, b) => s + b.core.end - b.core.start, 0);
+      return total < lo ? `only ${round(total)} s of good bits for the ${lo}+ s version` : "";
+    };
+    const wanted = [...new Set(platforms.map((p) => VERSIONS[p].span))];
+    return { clips: chosen, note: [note, ...wanted.map((s) => short(sets[s], sizes[s]))].filter(Boolean).join("; "),
+      comp: { sets: { long: sets.long.map((b) => chosen.indexOf(b)), core: sets.core.map((b) => chosen.indexOf(b)) }, ...named } };
+  }
+
+  async function planClips() {
+    const usable = await listen();
     log(`step: the brain rates ${usable.length} moments${count === "auto" ? "" : ` and keeps up to ${count}`}`);
     const { clips, note } = await pickClips(usable, { who, title, game, kind: tag === "podcast" ? "podcast" : "livestream", count: want,
       minScore, long, core, ...(avoid ? { avoid } : {}), log });
@@ -249,7 +293,9 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
       log(`layout: ${layout.kind} (${layout.why})${whole && small ? ", judged on the small copy" : ""}`);
     }
     const clipLayout = clipCams[i] ? { ...layout, cam: clipCams[i], frameless: false } : layout; // a frame found around this clip
-    for (const p of platforms) {
+    // A compilation's bit is made for each version it plays in (a bit's long and core are the same span): with the
+    // title on top the whole time and a fade to black at both ends (none at the very start: it opens straight away).
+    for (const p of compilation ? platforms.filter((q) => comp.sets[VERSIONS[q].span].includes(i)) : platforms) {
       const v = VERSIONS[p], span = c[v.span];
       const start = round(clamp(span.start + v.nudge, video.offset, span.end - 5)), end = span.end;
       let keys;
@@ -259,16 +305,20 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
           cuts: (faces.cuts || []).map((t) => t + shift) };
         keys = speakerTrack(shifted, c.speech.sentences.filter((s) => s.t1 > start && s.t0 < end), start);
       }
-      const name = `${String(i + 1).padStart(2, "0")}-${p}`;
-      log(`step: rendering clip ${i + 1} for ${p} (${round(end - start, 1)} s)`);
+      const name = compilation ? `bit${i + 1}-${p}` : `${String(i + 1).padStart(2, "0")}-${p}`;
+      log(`step: rendering ${compilation ? "bit" : "clip"} ${i + 1} for ${p} (${round(end - start, 1)} s)`);
       const r = await renderVersion({ file: video.file, seek: round(start - video.offset), src, start, end, layout: clipLayout, keys,
-        words: c.speech.words, hook: c.hook, credit, look: v.look, outFile: path.join(outDir, `${name}.mp4`), workDir, name });
-      outputs.push({ clip: i + 1, platform: p, file: `${name}.mp4`, seconds: r.seconds, renderSeconds: r.renderSeconds });
+        words: c.speech.words, hook: compilation ? comp.title : c.hook, credit, look: v.look, workDir, name, captions,
+        outFile: path.join(compilation ? piecesDir : outDir, `${name}.mp4`),
+        ...(compilation ? { hookStays: true, fade: { in: comp.sets[v.span][0] !== i, out: true } } : {}) });
+      if (!compilation) outputs.push({ clip: i + 1, platform: p, file: `${name}.mp4`, seconds: r.seconds, renderSeconds: r.renderSeconds });
     }
     if (video.temp) fs.rmSync(video.file, { force: true });
+    made.add(i);
     return true;
   };
-  const skipped = [];
+  const skipped = [], made = new Set(), piecesDir = path.join(workDir, "pieces");
+  if (compilation) fs.mkdirSync(piecesDir, { recursive: true });
   for (const [i, c] of clips.entries()) if (!(await makeClip(c, i))) skipped.push(i);
   if (skipped.length) { // the second chance: a site's (or DNS) hiccup is often over a few minutes later
     const wait = WAITS()[2];
@@ -277,7 +327,32 @@ async function clipVideo({ source, outDir, workDir, layout: tag = "auto", cam, c
     for (const i of skipped) if (!(await makeClip(clips[i], i))) log(`clip ${i + 1}: skipped for good`);
     outputs.sort((a, b) => a.clip - b.clip);
   }
+  if (compilation) { // one video per platform: its bits one after another (a bit skipped for good is left out)
+    for (const p of platforms) {
+      const order = comp.sets[VERSIONS[p].span].filter((i) => made.has(i));
+      if (!order.length) continue;
+      const file = `compilation-${p}.mp4`;
+      log(`step: joining ${order.length} bits into ${file}`);
+      const r = await joinPieces(order.map((i) => path.join(piecesDir, `bit${i + 1}-${p}.mp4`)), path.join(outDir, file), workDir);
+      outputs.push({ platform: p, file, seconds: r.seconds, bits: order.map((i) => i + 1) });
+    }
+  }
   if (!outputs.length) throw new Error("no clip could be made: none of their videos could be downloaded");
+  if (compilation) {
+    const result = {
+      ok: true, mode, who, title, layout: { kind: layout.kind, why: layout.why }, note,
+      compilation: {
+        title: censor(comp.title),
+        caption: `${censor(comp.caption)}${credit ? ` 🎥 ${credit}` : ""}${mustInclude ? `\n\n${mustInclude}` : ""}`,
+        bits: clips.map((c, i) => ({ bit: i + 1, score: c.score, by: c.by, why: c.why, peak: c.peak, start: c.core.start, end: c.core.end }))
+          .filter((b) => made.has(b.bit - 1)),
+      },
+      clips: [], outputs,
+    };
+    fs.writeFileSync(path.join(outDir, "result.json"), JSON.stringify(result, null, 2));
+    fs.rmSync(workDir, { recursive: true, force: true });
+    return result;
+  }
   const result = {
     ok: true, who, title, layout: { kind: layout.kind, why: layout.why }, note,
     clips: clips.map((c, i) => ({ // best first: clip 1 = rank 1 = files 01-*.mp4
@@ -297,7 +372,7 @@ module.exports = { clipVideo, rateCount, fillCams, scaleBox, VERSIONS, PLATFORMS
 if (require.main === module) {
   const [source, outDir, ...rest] = process.argv.slice(2);
   if (!source || !outDir) {
-    console.error("usage: node clip.js <video file or URL> <outDir> [--layout auto|streamer|podcast] [--cam x,y,w,h] [--credit @name] [--platforms tiktok,shorts,reels,x]");
+    console.error("usage: node clip.js <video file or URL> <outDir> [--layout auto|streamer|podcast] [--cam x,y,w,h] [--credit @name] [--platforms tiktok,shorts,reels,x] [--mode clips|compilation]");
     process.exit(2);
   }
   const opt = {};
@@ -307,7 +382,8 @@ if (require.main === module) {
   clipVideo({ source, outDir, layout: opt.layout || "auto", cam: camBox, credit: opt.credit || "", who: opt.who || "",
     title: opt.title || "", platforms: opt.platforms ? opt.platforms.split(",") : undefined, long: range(opt.long),
     core: range(opt.core), count: Number(opt.count) || "auto", candidates: Number(opt.candidates) || undefined,
-    minScore: opt["min-score"] ? Number(opt["min-score"]) : undefined, mustInclude: opt.must || "", avoid: opt.avoid })
+    minScore: opt["min-score"] ? Number(opt["min-score"]) : undefined, mustInclude: opt.must || "", avoid: opt.avoid,
+    mode: opt.mode || "clips", captions: opt.captions ? opt.captions !== "off" : undefined, bit: range(opt.bit) })
     .then((r) => console.log(JSON.stringify(r, null, 2)))
     .catch((e) => { console.error(`FAILED: ${e.message}`); process.exit(1); });
 }

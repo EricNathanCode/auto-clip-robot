@@ -9,11 +9,11 @@ const { spawn } = require("child_process");
 const { TOOLS, run, probe, retry } = require("./tools");
 const { excitement, pickPeaks, loudness, STEP } = require("./moments");
 const { fromWhisper, transcribe } = require("./speech");
-const { fitSpan, pickClips, rank, compare, lengthen, prompt, plain, tidyHook, SCHEMA } = require("./brain");
+const { fitSpan, pickClips, rank, compare, lengthen, prompt, plain, tidyHook, SCHEMA, pickBits, arrange, nameCompilation, bitPrompt } = require("./brain");
 const { decide, camBox, speakerTrack, cropXExpr, findFaces, shotCuts, webcamBorder, videoGraph } = require("./layout");
 const { chunks, buildAss, isBad, censor, LOOKS } = require("./captions");
 const { clipVideo, rateCount, fillCams, scaleBox } = require("./clip");
-const { renderVersion } = require("./render");
+const { renderVersion, joinPieces } = require("./render");
 const download = require("./download");
 
 const scratch = path.resolve(process.argv[2] || "autoclip-test");
@@ -173,6 +173,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(ranked.map((p) => `${p.rank}:${p.score}`).join(" ") === "1:9 2:8 3:8 4:6 5:4" && ranked[1].loud === 4,
     `ranked best first (a tie goes to the louder moment), none overlapping, AI scores under 6 dropped (${ranked.map((p) => p.score).join(", ")})`);
   check(rank([plan(9, 1, 0), plan(8, 1, 100), plan(7, 1, 200)], { count: 2, minScore: 6 }).length === 2, "never more clips than asked for");
+  const bitAt = (score, start, len, by = "brain") => ({ score, loud: 1, by, core: { start, end: start + len } });
+  const reel = arrange([bitAt(6, 100, 10), bitAt(9, 300, 12), bitAt(4, 50, 8), bitAt(8, 20, 14), bitAt(7, 200, 30), bitAt(7, 400, 9)], [30, 40], 5);
+  check(reel.map((b) => `${b.score}@${b.core.start}`).join(" ") === "9@300 8@20 7@400" && reel.reduce((s, b) => s + b.core.end - b.core.start, 0) === 35,
+    `a compilation takes the best bits until it's long enough (passing over one that would make it too long, and any under the minimum), best first, then in video order (${reel.map((b) => b.score).join(", ")})`);
+  check(arrange([bitAt(9, 0, 10), bitAt(8, 5, 10), bitAt(4, 60, 10, "loudness")], [25, 40], 7).map((b) => b.core.start).join() === "0,60",
+    "a compilation never repeats overlapping bits, and loudness-only bits (AI off) aren't held to the minimum");
 
   let calls = 0;
   const waited = [];
@@ -256,6 +262,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     hook: "Holy shit moment" });
   check(!/fuck|shit/i.test(rude) && rude.includes("****!") && rude.includes("Holy **** moment") && censor("You bitch.") === "You *****.",
     "bad words show as ***** in captions and hooks (punctuation kept)");
+  const titled = buildAss({ words: [], clipStart: 100, clipEnd: 112.5, hook: "Nobody Knew What Came Next", hookStays: true });
+  check(/Dialogue: 2,0:00:00.00,0:00:12.50,Hook,,0,0,0,,Nobody Knew/.test(titled) && !titled.includes("\\fad"),
+    "a compilation's title stays on screen the whole bit, with no fade (so it doesn't blink between bits)");
 
   console.log("\n--- TOOLS: LOUDNESS, SPEECH, FACES ---");
   const { voice, stream } = await makeStream(scratch);
@@ -290,6 +299,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     workDir: path.join(scratch, "beep-work"), name: "beep" });
   const bp = await probe(beeped);
   check(bp.hasAudio && bp.hasVideo && near(bp.duration, 4, 0.3), "a clip with a bad word renders, with the word muted and beeped");
+  const pieceA = path.join(scratch, "piece-a.mp4"), pieceB = path.join(scratch, "piece-b.mp4"), joined = path.join(scratch, "joined.mp4");
+  const pieceOpts = { file: stream, src: info, layout: { kind: "gameplay" }, words: [{ w: "shit", t0: 31, t1: 31.3 }], hook: "A Title That Stays",
+    credit: "@c", look: "pop", workDir: path.join(scratch, "piece-work"), captions: false, hookStays: true };
+  await renderVersion({ ...pieceOpts, seek: 30, start: 30, end: 33, outFile: pieceA, name: "a", fade: { in: false, out: true } });
+  await renderVersion({ ...pieceOpts, seek: 60, start: 60, end: 62, outFile: pieceB, name: "b", fade: { in: true, out: true } });
+  const shade = async (f, t) => (await run(TOOLS.ffmpeg(), ["-v", "error", "-ss", String(t), "-i", f, "-frames:v", "1",
+    "-vf", "crop=1080:600:0:700,scale=1:1,format=gray", "-f", "rawvideo", "-"])).charCodeAt(0); // the picture under the title
+  const [openA, openB] = [await shade(pieceA, 0), await shade(pieceB, 0)];
+  check(openB < 30 && openA > 40, `a compilation's bit fades in from black, except the first one, which opens straight away (brightness ${openB} vs ${openA})`);
+  await joinPieces([pieceA, pieceB], joined, path.join(scratch, "piece-work"));
+  const jp = await probe(joined);
+  check(near(jp.duration, 5, 0.25) && jp.hasAudio && jp.width === 1080 && jp.height === 1920,
+    `bits are joined one after another into one video (${jp.duration.toFixed(2)} s from 3 s + 2 s; one with a beep, one without)`);
   const camA = { x: 0, y: 0, w: 400, h: 300 }, camB = { x: 0, y: 0, w: 500, h: 360 };
   const filled = fillCams([{ face: { x: 100, y: 80, w: 60, h: 70 }, box: camA }, { face: { x: 110, y: 85, w: 60, h: 70 }, box: null },
     { face: { x: 120, y: 160, w: 80, h: 90 }, box: camB }, { face: { x: 400, y: 500, w: 60, h: 70 }, box: null }]);
@@ -332,7 +354,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     `clickbait words are taken out of hooks ("${tidyHook("Shocking Childhood Story")}")`);
   const brainAnswer = { score: 9, start: 0, core_end: 1, end: 2, hook: "THIS KEYBOARD IS INSANE 🤯 #wow", caption: "test caption", why: "test" };
   const finalAnswer = { scores: [{ clip: 0, score: 7 }, { clip: 1, score: 12 }] };
-  const fake = await fakeOllama((ask) => (ask.format?.properties?.scores ? finalAnswer : brainAnswer));
+  const bitAnswer = { why: "a quick joke", score: 8, start: 1, end: 2 }, titleAnswer = { title: "Every Unbelievable Keyboard Test Went Wrong 🤯 #fyp", caption: "test" };
+  const answerFor = (ask) => { const p = ask.format?.properties || {}; return p.scores ? finalAnswer : p.title ? titleAnswer : p.core_end ? brainAnswer : bitAnswer; };
+  const fake = await fakeOllama(answerFor);
   process.env.OLLAMA_URL = `http://127.0.0.1:${fake.address().port}`;
   const cand = { peak: 15, score: 3, reasons: ["loud"], start: 0, end: 30, speech: words };
   const picked = await pickClips([cand], { count: 1, long: [20, 28], core: [10, 18] });
@@ -348,6 +372,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const final = await compare(tied, { minScore: 7 });
   check(final.map((c) => `${c.rank}:${c.hook}:${c.alone}→${c.score}`).join(" ") === "1:Quiet one:8→10 2:Loud one:8→7",
     `final round: the clips compared side by side get new scores (7-10) and a new order (${final.map((c) => `${c.hook} ${c.score}`).join(", ")})`);
+  const bitAsk = bitPrompt(words.sentences, { bit: [5, 15] });
+  check(/setup and its punchline/.test(bitAsk) && /about 5-15 seconds/.test(bitAsk) && /politics/.test(bitAsk) && /most bits are 4-6/.test(bitAsk),
+    "for a compilation the brain is asked for one short bit (a setup and its punchline, 5-15 s), on a strict scale, banned topics scored 1");
+  fake.asked.length = 0;
+  const bitCtx = {};
+  const found = await pickBits([cand, { ...cand, peak: 25 }], bitCtx);
+  const b0 = found.bits[0], b0len = b0 ? b0.core.end - b0.core.start : 0;
+  check(found.bits.length === 2 && b0.by === "brain" && b0.score === 8 && b0len >= 5 && b0len <= 15.5 && b0.long.start === b0.core.start,
+    `a bit per moment, from the brain's sentences, fitted to 5-15 s (${b0len.toFixed(1)} s)`);
+  const named = await nameCompilation(found.bits, bitCtx);
+  check(named.title === "Every Keyboard Test Went Wrong" && /bits were cut from one/.test(fake.asked[fake.asked.length - 1].messages[0].content),
+    `one title for the whole compilation, written from its bits (without clickbait, emojis or hashtags: "${named.title}")`);
   const picky = await pickClips([cand], { count: 1, minScore: 10, long: [20, 28], core: [10, 18] });
   check(picky.clips.length === 0 && /no moment scored 10 or more \(best: 9\)/.test(picky.note), `a moment below the minimum score is skipped, and the note says why ("${picky.note}")`);
   process.env.OLLAMA_URL = "http://127.0.0.1:9";
@@ -400,6 +436,27 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const podInfo = await probe(path.join(scratch, "podcast", pod.outputs[0].file));
   check(pod.layout.kind === "podcast" && podInfo.width === 1080 && podInfo.height === 1920, "big faces → a 1080x1920 podcast clip that follows the speaker");
 
+  console.log("\n--- COMPILATION MODE (one video of short bits) ---");
+  const compLog = [];
+  const comp = await clipVideo({ source: stream, outDir: path.join(scratch, "compilation"), mode: "compilation", platforms: ["tiktok", "reels"],
+    long: [20, 40], core: [5, 20], credit: "@comp", log: (l) => compLog.push(l) }).catch((e) => ({ error: e.message }));
+  const compOut = comp.outputs || [], bitLen = (n) => { const b = comp.compilation.bits.find((x) => x.bit === n); return b.end - b.start; };
+  check(comp.mode === "compilation" && compOut.map((o) => o.file).join() === "compilation-tiktok.mp4,compilation-reels.mp4",
+    `one compilation video per platform (${comp.error || compOut.map((o) => o.file).join(", ")})`);
+  if (compOut.length === 2) {
+    const ct = await probe(path.join(scratch, "compilation", compOut[0].file));
+    const want = compOut[0].bits.reduce((s, n) => s + bitLen(n), 0);
+    check(ct.width === 1080 && ct.height === 1920 && ct.hasAudio && near(ct.duration, want, 0.5) && compOut[0].bits.length >= compOut[1].bits.length,
+      `TikTok's compilation plays ${compOut[0].bits.length} bits (${ct.duration.toFixed(1)} s); the shorter version keeps the best ${compOut[1].bits.length}`);
+    const scores = comp.compilation.bits.map((b) => b.score);
+    check(comp.compilation.bits.find((b) => b.bit === compOut[0].bits[0]).score === Math.max(...scores) && compOut[1].bits[0] === compOut[0].bits[0],
+      "the best bit plays first in every version");
+    check(comp.compilation.title === "The best moments" && /🎥 @comp$/.test(comp.compilation.caption) && comp.clips.length === 0,
+      `with the AI off there is still a title on top ("${comp.compilation.title}") and a caption with the credit`);
+    check(compLog.some((l) => /joining \d bits into compilation-tiktok\.mp4/.test(l)) && !fs.existsSync(path.join(scratch, "compilation", ".work")),
+      "the bits are joined, and the pieces are cleaned up after");
+  }
+
   console.log("\n--- THE JOB API (a server, like on the Dell) ---");
   process.env.OLLAMA_URL = `http://127.0.0.1:${fake.address().port}`;
   const work = path.join(scratch, "work");
@@ -421,10 +478,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check(empty.status === 400 && (await api(port, "GET", "/jobs/empty/status")).json.status === "failed", "starting with no video is refused and the job says why");
   await api(port, "POST", "/jobs/bad");
   const bads = [{ url: "ftp://x" }, { url: "https://x", platforms: ["myspace"] }, { url: "https://x", long: [90, 20] },
-    { url: "https://x", layout: "sideways" }, { url: "https://x", count: 31 }, { url: "https://x", minScore: 0 }];
+    { url: "https://x", layout: "sideways" }, { url: "https://x", count: 31 }, { url: "https://x", minScore: 0 }, { url: "https://x", mode: "montage" }];
   const codes = [];
   for (const b of bads) { await api(port, "POST", "/jobs/bad"); codes.push((await api(port, "POST", "/jobs/bad/start", b)).status); }
-  check(codes.every((c) => c === 400), `bad url / platform / lengths / layout / count / minScore are refused (${codes.join(",")})`);
+  check(codes.every((c) => c === 400), `bad url / platform / lengths / layout / count / minScore / mode are refused (${codes.join(",")})`);
   check((await api(port, "PUT", "/jobs/..%2F..%2Fescape/files/x.mp4", undefined, voice)).status !== 500 && !fs.existsSync(path.join(scratch, "escape")),
     "sneaky ../ names stay inside the work folder");
 

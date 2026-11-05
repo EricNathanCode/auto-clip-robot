@@ -67,7 +67,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 }
 
 // words: [{ w, t0, t1 }] with times in seconds of the SOURCE; clipStart/clipEnd cut them to the clip.
-function buildAss({ words, clipStart, clipEnd, look = "pop", hook = "", credit = "", captionY = 1250, hookY = 230, hookSeconds = 3.2 }) {
+// hookStays: the hook is a compilation's title, on screen the whole piece with no fade, so it doesn't blink between bits.
+function buildAss({ words, clipStart, clipEnd, look = "pop", hook = "", credit = "", captionY = 1250, hookY = 230, hookSeconds = 3.2, hookStays = false }) {
   const L = LOOKS[look] || LOOKS.pop;
   const lines = [];
   const inClip = words.filter((w) => w.t1 > clipStart && w.t0 < clipEnd)
@@ -86,7 +87,10 @@ function buildAss({ words, clipStart, clipEnd, look = "pop", hook = "", credit =
       lines.push(`Dialogue: 1,${ts(a)},${ts(b)},Cap,,0,0,0,,{\\an5\\pos(${W / 2},${captionY})}${text}`);
     });
   });
-  if (hook) lines.push(`Dialogue: 2,${ts(0)},${ts(Math.min(hookSeconds, clipEnd - clipStart))},Hook,,0,0,0,,{\\fad(120,250)}${censor(clean(hook))}`);
+  if (hook) {
+    const hookEnd = hookStays ? clipEnd - clipStart : Math.min(hookSeconds, clipEnd - clipStart);
+    lines.push(`Dialogue: 2,${ts(0)},${ts(hookEnd)},Hook,,0,0,0,,${hookStays ? "" : "{\\fad(120,250)}"}${censor(clean(hook))}`);
+  }
   if (credit) lines.push(`Dialogue: 0,${ts(0)},${ts(clipEnd - clipStart)},Credit,,0,0,0,,${clean(credit)}`);
   return header(L, { captionY, hookY }) + lines.join("\n") + "\n";
 }

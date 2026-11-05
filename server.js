@@ -3,7 +3,8 @@
 //   POST   /jobs/<job>                → reserves a fresh job ("receiving") before its source is sent
 //   PUT    /jobs/<job>/files/<name>   → raw body: a source video (campaign footage from Drive), saved to <job>/in/<name>
 //   POST   /jobs/<job>/start          → JSON body { url?, layout, cam?, credit, who, title, platforms, long, core,
-//                                       count? ("auto" = every moment scoring minScore+, no limit), minScore? (7), candidates?, mustInclude?, avoid? }:
+//                                       count? ("auto" = every moment scoring minScore+, no limit), minScore? (7), candidates?, mustInclude?, avoid?,
+//                                       mode? ("clips" | "compilation": one video of short bits, compilation-<platform>.mp4), captions? }:
 //                                       starts clipping in the background (an uploaded file, or the url) and answers 202
 //   GET    /jobs/<job>/status         → { status: receiving | queued | working | done | failed, step, seconds, result | error }
 //   GET    /jobs/<job>/clips/<file>   → one finished MP4 (names are listed in result.outputs)
@@ -101,8 +102,13 @@ function checkOptions(body, jobDir) {
     o.candidates = Number(body.candidates);
     if (!(o.candidates >= (o.count === "auto" ? 1 : o.count) && o.candidates <= 30)) return { error: "candidates must be between count and 30" };
   }
-  o.minScore = body.minScore === undefined ? 7 : Number(body.minScore); // the AI score (1-10) a clip needs
-  if (!(o.minScore >= 1 && o.minScore <= 10)) return { error: "minScore must be 1-10" };
+  if (body.minScore !== undefined) { // the AI score (1-10) a clip needs (default 7; 5 for a compilation's bits)
+    o.minScore = Number(body.minScore);
+    if (!(o.minScore >= 1 && o.minScore <= 10)) return { error: "minScore must be 1-10" };
+  }
+  o.mode = String(body.mode || "clips").toLowerCase(); // clips, or one compilation of short bits (D040)
+  if (!["clips", "compilation"].includes(o.mode)) return { error: `unknown mode "${body.mode}" (use: clips, compilation)` };
+  if (body.captions !== undefined) o.captions = Boolean(body.captions); // default: on for clips, off for a compilation
   o.mustInclude = String(body.mustInclude || "").slice(0, 500); // campaign's required post text (#ad, show name…)
   if (body.avoid) o.avoid = String(body.avoid).slice(0, 300); // campaign's banned topics
   o.credit = String(body.credit || "").slice(0, 40);

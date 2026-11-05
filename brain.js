@@ -4,6 +4,7 @@
 // makes the lengths fit. If the AI is off, the robot still picks clips from the loudness alone.
 // Two rounds: each moment is scored on its own (strict scale; it writes why first, then the score), then the kept
 // clips are compared side by side in one final round, which decides the ranking.
+// Compilation mode (at the end): one short bit per moment instead, and one title for the whole compilation.
 const { TOOLS, postJson, round, clamp } = require("./tools");
 
 const limitMs = () => (Number(process.env.BRAIN_LIMIT_MIN) || 15) * 60 * 1000; // the Dell's CPU is slow; allow 15 min
@@ -224,4 +225,121 @@ async function pickClips(candidates, ctx = {}) {
   return { clips, note: [ctx.brainProblem, tooLow].filter(Boolean).join("; ") };
 }
 
-module.exports = { pickClips, planMoment, rank, compare, lengthen, fitSpan, brainProblem, prompt, plain, tidyHook, LENGTHS, SCHEMA, AVOID };
+// ── Compilation mode (D040): many short bits from one video, joined into one clip under one title ──
+// Each candidate window gives at most one bit: a setup and its punchline (or a quick action and the reaction).
+const BIT = [5, 15]; // seconds per bit
+const COMPILE = { long: [61, 90], core: [30, 60] }; // the whole compilation: TikTok's version, then the others
+const BIT_SCHEMA = {
+  type: "object",
+  properties: { why: { type: "string" }, score: { type: "integer", minimum: 1, maximum: 10 }, start: { type: "integer" }, end: { type: "integer" } },
+  required: ["why", "score", "start", "end"],
+};
+const TITLE_SCHEMA = { type: "object", properties: { title: { type: "string" }, caption: { type: "string" } }, required: ["title", "caption"] };
+
+function bitPrompt(sentences, { who, title, kind, game, bit = BIT, avoid = AVOID }) {
+  const lines = sentences.map((s, i) => `[${i}] (${round(s.t1 - s.t0, 1)}s) ${s.text}`).join("\n");
+  return `You cut a compilation of the best quick moments from a ${kind || "livestream"}${who ? ` by ${who}` : ""}${game ? ` playing the game ${game}` : ""}${title ? ` titled "${title}"` : ""}.
+Here is what was said around one possible moment, as numbered sentences with their length:
+${lines}
+
+Find the best SHORT bit in it, about ${bit[0]}-${bit[1]} seconds: a setup and its punchline, or a quick action and the reaction, that is funny or surprising on its own, without the rest of the video.
+- why: max 15 words: what happens in the bit
+- score: 1-10, how well this bit would land in a compilation of the best bits. Be strict and use the whole scale; most bits are 4-6:
+  10 = a huge laugh or shock that people would replay
+  8-9 = clearly funny or surprising, and it lands fast
+  7 = a clear small laugh
+  5-6 = mildly amusing, slow, or it needs outside context
+  1-4 = nothing happens, small talk
+  If the bit is mainly about ${avoid}, the score is 1. If they are mainly watching or reacting to someone else's video, the score is 1: that is someone else's content.
+- start: the sentence number where the bit starts: the setup, not filler before it
+- end: the sentence number where it ends: right after the punchline or the reaction
+Answer only with JSON.`;
+}
+
+function titlePrompt(bits, { who, title, kind }) {
+  const list = bits.map((b, i) => {
+    const said = b.speech.sentences.slice(b.core.sentences[0], b.core.sentences[1] + 1).map((s) => s.text).join(" ");
+    return `[${i}] ${said.length > 300 ? `${said.slice(0, 300)}…` : said}`;
+  }).join("\n");
+  return `These short bits were cut from one ${kind || "livestream"}${who ? ` by ${who}` : ""}${title ? ` titled "${title}"` : ""}, to play one after another in one compilation video:
+${list}
+
+Write:
+- title: shown on screen for the whole video, max 10 words: what these bits have in common, so people want to watch them all. Written like a person talking, not like a video title. It must be TRUE to what happens: no exaggeration, no claims about real people, no clickbait. It doesn't start with a person's, channel's, game's or show's name, and has no dashes, colons, hashtags or emojis.
+- caption: a post caption, max 150 characters, true to the video, no hashtags, no emojis.
+Answer only with JSON.`;
+}
+
+// One candidate → its best bit: { score, by, core: {start, end, sentences}, long (the same span), why, speech, … }.
+// With no brain, the bit is the few sentences around the loud peak.
+async function planBit(cand, ctx) {
+  const sentences = cand.speech.sentences;
+  if (!sentences.length) return null;
+  const bit = ctx.bit || BIT;
+  let a = sentenceAt(sentences, cand.peak - 8), b = sentenceAt(sentences, cand.peak + 3);
+  let score = Math.round(clamp(cand.score, 1, 10)), why = "", by = "loudness";
+  if (!ctx.brainProblem) {
+    try {
+      const ans = await askBrain(bitPrompt(sentences, { ...ctx, bit }), BIT_SCHEMA);
+      const last = sentences.length - 1;
+      a = clamp(ans.start | 0, 0, last); b = clamp(ans.end | 0, a, last);
+      score = clamp(ans.score | 0, 1, 10); why = String(ans.why || "").trim(); by = "brain";
+    } catch (e) {
+      ctx.log?.(`brain failed on the moment at ${cand.peak}s: ${e.message}`);
+    }
+  }
+  [a, b] = fitSpan(sentences, a, b, bit);
+  const span = { ...spanOf(sentences, a, b), sentences: [a, b] };
+  return { peak: cand.peak, score, by, reasons: cand.reasons, loud: cand.score, long: span, core: span, hook: "", caption: "", why,
+    speech: cand.speech, until: cand.end };
+}
+
+// Plans a bit in every candidate (ctx.brainProblem is filled in for nameCompilation).
+async function pickBits(candidates, ctx = {}) {
+  ctx.brainProblem = ctx.brainProblem ?? await brainProblem();
+  const bits = [];
+  for (const c of candidates) {
+    const b = await planBit(c, ctx);
+    if (!b) continue;
+    bits.push(b);
+    ctx.log?.(`bit at ${c.peak}s: score ${b.score} (${b.by}), ${round(b.core.end - b.core.start, 1)} s${b.why ? `: ${b.why}` : ""}`);
+  }
+  return { bits, note: ctx.brainProblem };
+}
+
+// The bits for one compilation of [lo, hi] seconds: the best first until it's long enough (a bit that would make it
+// too long is passed over for a shorter one), none the AI scored under minScore, none overlapping. Played with the
+// best first (the hook), then the rest in the order they happen in the video.
+function arrange(bits, [lo, hi], minScore = 0) {
+  const pick = [];
+  let total = 0;
+  for (const b of [...bits].sort((x, y) => y.score - x.score || y.loud - x.loud)) {
+    if (total >= lo) break;
+    const len = b.core.end - b.core.start;
+    if ((b.by === "brain" && b.score < minScore) || total + len > hi) continue;
+    if (pick.some((p) => Math.min(p.core.end, b.core.end) > Math.max(p.core.start, b.core.start))) continue;
+    pick.push(b);
+    total += len;
+  }
+  const [best, ...rest] = pick;
+  return best ? [best, ...rest.sort((x, y) => x.core.start - y.core.start)] : [];
+}
+
+// One title (on screen the whole video) and a post caption for the bits of a compilation.
+async function nameCompilation(bits, ctx) {
+  let title = "", caption = "";
+  if (!ctx.brainProblem && bits.length) {
+    try {
+      const ans = await askBrain(titlePrompt(bits, ctx), TITLE_SCHEMA);
+      title = tidyHook(ans.title).split(/\s+/).slice(0, 10).join(" ");
+      caption = plain(ans.caption).slice(0, 150);
+    } catch (e) {
+      ctx.log?.(`the title failed (${e.message}): a plain one is used`);
+    }
+  }
+  title = title || `The best moments${ctx.who ? ` with ${ctx.who}` : ""}`;
+  return { title, caption: caption || title };
+}
+
+module.exports = { pickClips, planMoment, rank, compare, lengthen, fitSpan, brainProblem, prompt, plain, tidyHook, LENGTHS, SCHEMA, AVOID,
+  pickBits, planBit, arrange, nameCompilation, bitPrompt, BIT, COMPILE };

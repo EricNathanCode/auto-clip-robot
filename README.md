@@ -7,6 +7,10 @@ A self-hosted clipping robot for my homelab: it turns a long **livestream or pod
 
 > Only for creators who **allow clipping** (official clipping programs / campaigns). Clips always credit the creator.
 
+**Two modes:** 🎬 **clips** (every great moment becomes its own clip, below) or 🎞️ **compilation**: many short
+bits (a setup and its punchline, 5–15 s each) joined into **one** video, the best bit first, quick fades between bits
+and one AI-written title on top the whole time (TikTok 61–90 s, the others 30–60 s; word captions off by default).
+
 ## How it works
 ```
 link (YouTube / Twitch) or uploaded footage
@@ -17,6 +21,8 @@ link (YouTube / Twitch) or uploaded footage
                      it) and a caption; every moment scoring 7+ becomes a clip. A final round compares the clips side by side
                      and ranks them. Falls back to loudness if the AI is off.
                      Hooks must be true (no exaggeration about real people, no clickbait words), banned topics score 1, emojis are removed
+                     Compilation mode: one short bit per moment instead (scored the same strict way), the best bits until
+                     the video is long enough, and one title for all of them
   → ⬇️ download.js  the picture in H.264 (YouTube: the whole video once, cut locally; Twitch: just each clip's minutes,
                      plus a small 360p copy of the whole stream to find the layout and the webcam's border on)
   → 🙂 layout.js    OpenCV YuNet finds faces: 🎮 streamer (the face that stays put near an edge = the webcam → cam on
@@ -28,7 +34,8 @@ link (YouTube / Twitch) or uploaded footage
                      streamed, and the cam on top hugs the person, shoulder to shoulder, so little game shows around
                      them); a big cam keeps the whole game centered instead of cutting a third of it away
   → 🎬 render.js    FFmpeg: layout + ASS captions (Fredoka) + hook + credit, bad words beeped (and ***** on screen),
-                     loudness to -14 LUFS, H.264 MP4
+                     loudness to -14 LUFS, H.264 MP4. A compilation's bits fade to black at the joins (the title stays
+                     on top) and are joined without re-encoding
 ```
 
 ## One version per platform
@@ -47,7 +54,7 @@ A campaign's own length rule replaces the defaults. Different cuts and looks mea
 | `GET /health` | ffmpeg / yt-dlp / whisper model check, `busy` (so n8n can take turns with the Auto Edit Robot) |
 | `POST /jobs/<job>` | reserve a job |
 | `PUT /jobs/<job>/files/<name>` | upload footage (e.g. a campaign's Drive file) |
-| `POST /jobs/<job>/start` | JSON `{ url?, layout, cam?, credit, who, title, platforms, long, core, count?, minScore?, candidates?, mustInclude?, avoid? }` → 202, runs in the background (`count` = `"auto"` (default: every moment scoring `minScore`+, no limit) or 1–30 (the best N); `minScore` = the AI score a clip needs, default 7; `candidates` = moments the AI rates (default 1 per 2 min, 4–30; ~4–5 min each on the Dell); `mustInclude` = text a campaign requires in every caption, e.g. `#ad`; `avoid` = topics it bans). Clips are ranked: `01-*.mp4` = best |
+| `POST /jobs/<job>/start` | JSON `{ url?, layout, cam?, credit, who, title, platforms, long, core, count?, minScore?, candidates?, mustInclude?, avoid? }` → 202, runs in the background (`count` = `"auto"` (default: every moment scoring `minScore`+, no limit) or 1–30 (the best N); `minScore` = the AI score a clip needs, default 7; `candidates` = moments the AI rates (default 1 per 2 min, 4–30; ~4–5 min each on the Dell); `mustInclude` = text a campaign requires in every caption, e.g. `#ad`; `avoid` = topics it bans; `mode` = `"clips"` (default) or `"compilation"` → `compilation-<platform>.mp4`, then `long`/`core` are the whole video's lengths and `minScore` defaults to 5; `captions` = word captions on/off). Clips are ranked: `01-*.mp4` = best |
 | `GET /jobs/<job>/status` | queued / working (+ step) / done (+ clips, hooks, captions, files) / failed (+ reason) |
 | `GET /jobs/<job>/clips/<file>` | download one MP4 |
 | `DELETE /jobs/<job>` | clean up |
@@ -71,7 +78,7 @@ time, and the big source file is deleted as soon as the clips are made.
 - Give the container reliable DNS: `docker run … --dns 1.1.1.1 --dns 8.8.8.8 …` (a home router's DNS can drop lookups).
 
 ## Tests
-`node test.js <scratchDir>`: **99 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
+`node test.js <scratchDir>`: **112 end-to-end checks** with made-up media (a test-pattern "stream" with a synthetic
 voice and two hype moments), a fake Ollama, fake faces for the podcast layout, the whole job API, and links served
 by a tiny local web server (cut in pieces like Twitch, with failing downloads). On the Dell: `docker run --rm -v /opt/autoclip/test.js:/app/test.js autoclip node test.js /tmp/autoclip-test`
 
